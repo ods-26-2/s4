@@ -1,7 +1,7 @@
 # Plano de Implementação — S4 Evidência de Mídia
 
 > Projeto ODS 2026/2 — Squad MOD-2 · Componente S4 (Camada 3 — Serviço)
-> Guia de referência: [`docs/responsability.md`](responsability.md) · Checklist do guia (seção 9)
+> Guia de referência: [`docs/responsability.md`](../../../docs/referencia/responsability.md) · Checklist do guia (seção 9)
 
 ## 1. Objetivo
 

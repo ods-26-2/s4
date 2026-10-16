@@ -78,7 +78,7 @@ mod2/s4-media-evidence/
 
 ## 🧩 Submódulos e Responsabilidades (Squad MOD-2)
 
-Conforme definido em [`docs/responsability.md`](../../docs/responsability.md):
+Conforme definido em [`docs/responsability.md`](../../../docs/referencia/responsability.md):
 
 | Submódulo | Funcionalidade | Padrão / Arquitetura | Responsável |
 | :--- | :--- | :--- | :--- |
@@ -339,7 +339,7 @@ curl -s http://127.0.0.1:8080/api/v1/buffer/stats | jq
 > `ODS_CHECK` ([`tests/ods_check.hpp`](tests/ods_check.hpp)), que vale em qualquer modo de build.
 
 O plano de implementação original está em
-[`docs/PLANO_IMPLEMENTACAO_S4.md`](../../docs/PLANO_IMPLEMENTACAO_S4.md); o que
+[`docs/PLANO_IMPLEMENTACAO_S4.md`](docs/PLANO_IMPLEMENTACAO_S4.md); o que
 ele listava como backlog já foi implementado — S4.1 em
 [`docs/S4.1-ring-buffer.md`](docs/S4.1-ring-buffer.md) e S4.3 em
 [`docs/S4.3-retencao-expurgo.md`](docs/S4.3-retencao-expurgo.md).
@@ -444,7 +444,7 @@ aceito pelo `h264parse` e pixels decodificados são evidências diferentes.
 
 Detalhes, verificação e instruções para a **Jetson Orin Nano (arm64)** — build nativo na própria Jetson
 ou alternativa com `buildx`/`binfmt` — estão em
-[`docs/PLANO_CONTAINERIZACAO_S4.md`](../../docs/PLANO_CONTAINERIZACAO_S4.md).
+[`docs/PLANO_CONTAINERIZACAO_S4.md`](docs/PLANO_CONTAINERIZACAO_S4.md).
 
 ---
 

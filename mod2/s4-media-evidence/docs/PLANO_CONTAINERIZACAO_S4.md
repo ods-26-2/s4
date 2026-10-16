@@ -1,7 +1,7 @@
 # Plano de Containerização — S4 Evidência de Mídia
 
 > Projeto ODS 2026/2 — Squad MOD-2 · Componente S4 (Camada 3 — Serviço)
-> Referência: [`docs/PLANO_IMPLEMENTACAO_S4.md`](PLANO_IMPLEMENTACAO_S4.md) · [`docs/responsability.md`](responsability.md)
+> Referência: [`docs/PLANO_IMPLEMENTACAO_S4.md`](PLANO_IMPLEMENTACAO_S4.md) · [`docs/responsability.md`](../../../docs/referencia/responsability.md)
 
 ## 1. Objetivo
 
