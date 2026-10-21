@@ -111,8 +111,9 @@ if(ODS_S4_WITH_GSTREAMER AND NOT ODS_S4_GSTREAMER_ENABLED)
     # gstreamer1.0-dev: e um descuido facil de cometer e o sintoma e sempre o
     # mesmo, "o build passa mas nao tem GStreamer".
     set(ODS_S4_GSTREAMER_HINT
-        "Debian/Ubuntu: apt-get install gstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good
-         Fedora/RHEL:   dnf install gstreamer1-devel gstreamer1-plugins-base-devel gstreamer1-plugins-base
+        "Debian/Ubuntu: apt-get install gstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
+         Fedora/RHEL:   dnf install gstreamer1-devel gstreamer1-plugins-base-devel gstreamer1.0-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad gstreamer1-plugins-ugly gstreamer1-libav
+         (plugins-good traz qtdemux/mp4mux; plugins-bad traz o h264parse; plugins-ugly traz o x264enc; libav traz o avdec_h264.)
          Se o .pc existe em outro prefixo, aponte PKG_CONFIG_PATH para ele.")
     if(ODS_S4_REQUIRE_GSTREAMER)
         message(FATAL_ERROR

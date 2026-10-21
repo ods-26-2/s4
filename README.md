@@ -2,6 +2,12 @@
 
 > Componente da **Camada 3 (Serviço)** do Squad **MOD-2** (Mídia, Métricas e Interfaces) no projeto **ODS 2026/2**.
 
+> **Este repositório é o repositório definitivo do componente S4.** A raiz do repositório
+> **é** o componente: o código, o build (CMake/Docker), a suíte de testes e a documentação
+> do S4 estão aqui. Não há mais a pasta `mod2/s4-media-evidence/` — todos os comandos deste
+> README rodam a partir da raiz. Os demais componentes do squad (S5, B6) vivem em seus
+> próprios repositórios.
+
 O serviço **S4** é responsável por gerenciar o ciclo de vida das evidências audiovisuais na borda (**NVIDIA Jetson Orin Nano**), incluindo captura contínua em buffer de memória RAM, extração de clipes probatórios vinculados a eventos do Barramento B3, persistência em SSD NVMe com integridade criptográfica (SHA-256) e expurgo automático conforme LGPD e políticas de cota de disco.
 
 ---
@@ -21,12 +27,15 @@ O serviço **S4** é responsável por gerenciar o ciclo de vida das evidências 
 O projeto adota os princípios de **Clean Architecture**, **Domain-Driven Design (DDD)** e **Design Patterns (GoF)**, desenvolvido em **C++20** com sistema de build **CMake**.
 
 ```text
-mod2/s4-media-evidence/
+<raiz do repositório>/
 ├── CMakeLists.txt              # Configuração de build C++20 e dependências
 ├── README.md                   # Documentação do componente
 ├── Dockerfile                  # Imagem OCI multi-arch (builder + runtime)
 ├── docker-compose.yml          # Orquestração local (porta 8080 + volume)
 ├── .dockerignore               # Exclusões do contexto de build
+├── docs/                       # Documentação: guias do componente + guias do squad ODS
+├── scenarios/                  # Cenário gravado (.idx/.bin) usado no replay
+├── video_test/                 # MP4 H.264 de teste (matéria-prima do replay E2E)
 ├── third_party/httplib/        # cpp-httplib vendido (HTTP server)
 ├── include/s4/                 # Headers públicos da biblioteca
 │   ├── domain/                 # 1. Coração do negócio (zero dependências externas)
@@ -58,8 +67,8 @@ mod2/s4-media-evidence/
 ├── src/                        # Implementações (.cpp)
 │   ├── application/use_cases/  # extract_clip.cpp
 │   ├── presentation/http/      # controller + servidor REST
-│   └── infrastructure/         # hashing, database, filesystem, gstreamer
-├── main.cpp → src/main.cpp     # Daemon demo executável
+│   ├── infrastructure/         # hashing, database, filesystem, gstreamer
+│   └── main.cpp                # Daemon demo executável
 ├── tools/                      # record_scenario: grava um cenário em .idx/.bin
 ├── scripts/smoke_e2e.sh        # Verificação E2E de ponta a ponta
 └── tests/                      # Suíte de testes automatizados
@@ -78,7 +87,7 @@ mod2/s4-media-evidence/
 
 ## 🧩 Submódulos e Responsabilidades (Squad MOD-2)
 
-Conforme definido em [`docs/responsability.md`](../../docs/responsability.md):
+Conforme definido em [`docs/responsability.md`](docs/responsability.md):
 
 | Submódulo | Funcionalidade | Padrão / Arquitetura | Responsável |
 | :--- | :--- | :--- | :--- |
@@ -184,6 +193,19 @@ no relógio de captura — uma janela ancorada no instante mais recente esperari
 | `stopCapture()` com extração esperando o pós-evento | wakeup perdido podia prender a extração até o timeout; corrigido |
 | `ctest`, ASan + UBSan, ThreadSanitizer | tudo passando; nenhuma condição de corrida |
 
+### Revalidação (21/10/2026, Fedora 44, GCC 15, **com** GStreamer 1.24 no container)
+
+Reestruturação do repositório: a raiz passou a ser o próprio componente S4 (antes `mod2/s4-media-evidence/`).
+
+| Verificação | Resultado |
+| :--- | :--- |
+| Build local (`cmake -S . -B build`) | passa; sem os headers do GStreamer na máquina, só com `-DODS_S4_WITH_GSTREAMER=OFF` — e o `cmake` **falha** em vez de degradar em silêncio |
+| `ctest` local (13 suítes) | 11 aprovadas, 2 **Skipped** (as de MP4 real, que exigem GStreamer) |
+| `ctest` dentro do `docker build` (com GStreamer) | **13/13 aprovadas** — inclusive `test_s4_replay_e2e` e `test_s4_gstreamer_capture` |
+| `docker build --target smoke` | `SMOKE OK` nas 6 etapas, com pixels decodificados por `avdec_h264` e hash estável entre execuções |
+| `docker compose up -d --build` | serviço `healthy`; `GET /healthz` → `{"status": "ok"}`; `GET /api/v1/buffer/stats` devolve a arena em uso |
+| Alvo padrão do `docker build` | **corrigido**: sem o estágio final `FROM runtime AS production`, a tag `0.1.0` era a imagem do `smoke` (com `jq` e `gstreamer1.0-tools` dentro) — o `docker compose` subia o serviço a partir dela |
+
 ---
 
 ## 🗑️ S4.3 — Retenção & Expurgo LGPD: entrada → processamento → saída
@@ -223,20 +245,38 @@ Resumo; o detalhamento está em [`docs/S4.3-retencao-expurgo.md`](docs/S4.3-rete
     `gstreamer1.0-libav` (é onde mora o `avdec_h264`): os dois não são
     necessários para compilar, e sem eles a suíte de captura real e a
     verificação de pixels do smoke saem como *Skipped* em vez de prova.
+    Em Fedora/RHEL os equivalentes são `gstreamer1-devel`,
+    `gstreamer1-plugins-base-devel` (é ele que traz o `gstreamer-app-1.0.pc`),
+    `gstreamer1-plugins-base`, `gstreamer1-plugins-good`,
+    `gstreamer1-plugins-bad`, `gstreamer1-plugins-ugly` e `gstreamer1-libav`.
     O `cmake` **falha** se o GStreamer não for encontrado, em vez de compilar
     sem ele em silêncio; para desligar de propósito, `-DODS_S4_WITH_GSTREAMER=OFF`.
+
+Installação completa em Fedora:
+
+```bash
+sudo dnf install -y gcc-c++ cmake pkgconf-pkg-config sqlite-devel openssl-devel \
+     libuuid-devel gstreamer1-devel gstreamer1-plugins-base-devel \
+     gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad \
+     gstreamer1-plugins-ugly gstreamer1-libav
+```
 
 ---
 
 ## 🔨 Compilação e Testes
 
+Todos os comandos abaixo rodam **na raiz do repositório**.
+
 ### Compilando o Projeto
 
 ```bash
-mkdir -p build && cd build
-cmake ..
-cmake --build .
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
 ```
+
+O `cmake` **falha** se o GStreamer não for encontrado, em vez de compilar sem captura de vídeo em silêncio
+(`-DODS_S4_WITH_GSTREAMER=OFF` desliga isso de propósito, e a suíte sai com os cenários de MP4 real como
+*Skipped*). Para reprovar quando o MP4 de teste não está em `video_test/`, use `-DODS_S4_REQUIRE_SAMPLE_VIDEO=ON`.
 
 ### Executando Testes
 
@@ -244,8 +284,12 @@ Os testes de unidade seguem a convenção `deve_[resultado]_quando_[condicao]`. 
 (exceto o cálculo de hash); a integração cobre SQLite em arquivo temporário, extração com filesystem real e servidor HTTP.
 
 ```bash
-ctest --output-on-failure
+ctest --test-dir build --output-on-failure
 ```
+
+São 13 suítes. Duas podem sair **Skipped** (`77`) em vez de aprovadas: `test_s4_replay_e2e`, sem MP4 em
+`video_test/` ou sem GStreamer, e `test_s4_gstreamer_capture`, sem `x264enc`/`avdec_h264`. Skipped é o resultado
+honesto para "não executado"; para reprovar nesses casos, `-DODS_S4_REQUIRE_SAMPLE_VIDEO=ON`.
 
 ### Executando o Serviço (daemon demo)
 
@@ -287,7 +331,7 @@ ls -lh /dev/shm/ods_s4_ring_cam0         # o buffer circular, enquanto o daemon 
 O daemon também sobe o expurgo do S4.3. Parâmetros opcionais (padrões do guia):
 
 ```bash
-./s4_media_evidence ... --retention-days 7 --quota-trigger 0.85 --quota-target 0.80 \
+./build/s4_media_evidence ... --retention-days 7 --quota-trigger 0.85 --quota-target 0.80 \
     --sweep-interval 3600 --disk-check-interval 30 --purge-log /tmp/s4_purge_log.jsonl
 ```
 
@@ -339,7 +383,7 @@ curl -s http://127.0.0.1:8080/api/v1/buffer/stats | jq
 > `ODS_CHECK` ([`tests/ods_check.hpp`](tests/ods_check.hpp)), que vale em qualquer modo de build.
 
 O plano de implementação original está em
-[`docs/PLANO_IMPLEMENTACAO_S4.md`](../../docs/PLANO_IMPLEMENTACAO_S4.md); o que
+[`docs/PLANO_IMPLEMENTACAO_S4.md`](docs/PLANO_IMPLEMENTACAO_S4.md); o que
 ele listava como backlog já foi implementado — S4.1 em
 [`docs/S4.1-ring-buffer.md`](docs/S4.1-ring-buffer.md) e S4.3 em
 [`docs/S4.3-retencao-expurgo.md`](docs/S4.3-retencao-expurgo.md).
@@ -351,84 +395,38 @@ ele listava como backlog já foi implementado — S4.1 em
 Imagem OCI **multi-arch** (`debian:bookworm-slim`, multi-stage): o estágio `builder` compila em C++20 e executa o
 `ctest` completo (falha de teste quebra o build), e o estágio `runtime` final contém apenas as bibliotecas em tempo de
 execução e o binário, rodando como usuário não-root `s4` com `VOLUME /data`.
-# Guia de Desenvolvimento e Execução - Kit B6 (Módulo MOD-2)
 
-Este repositório contém a implementação dos submódulos de interface **B6.1 (OverlayPlayer)** e **B6.2 (ZoneEditor)**, responsáveis pela renderização gráfica acelerada e edição topológica vetorial do ecossistema ODS.
+### Construindo a imagem
 
-## 🛠️ Pré-requisitos e Configuração Inicial
-
-Para garantir que o ambiente local executa corretamente tanto o servidor de testes visuais (HTML) quanto a suíte de testes automatizados (TDD), é necessário preparar o ecossistema Node.js.
-
-Na raiz do seu diretório (`~/MOD2_ODS/mod2`), execute os seguintes comandos:
-
-1. **Inicializar o pacote NPM** (caso não exista um `package.json`):
-   ```bash
-   npm init -y
-   ```
-
-2. **Instalar as dependências de desenvolvimento**:
-   ```bash
-   npm install -D vite vitest jsdom
-   ```
-   * **vite:** Servidor de desenvolvimento rápido para processar o TypeScript e servir os ficheiros `index.html`.
-   * **vitest & jsdom:** Framework de testes unitários e simulador de navegador para garantir a validação de regras de domínio (Zero I/O) sem depender da interface gráfica real.
-
----
-
-## 🖥️ Executar os Testes Visuais (HTML)
-
-Os ficheiros HTML permitem testar a interação física (cliques do rato, renderização a 60 FPS e sobreposição de vídeo) no navegador.
-
-### B6.1 - OverlayPlayer (Visualizador e Sincronização por Intervalos)
-1. Certifique-se de que o ficheiro `index_player.html` está configurado para importar o `b6_overlay_player.ts`.
-2. Inicie o servidor Vite:
-   ```bash
-   npx vite
-   ```
-3. Abra o link fornecido na consola (normalmente `http://localhost:5173/index_player.html`).
-4. **O que testar:** O player reproduz o clipe utilizando controlos customizados encapsulados (Play/Pause, barra de progresso temporal, volume e ecrã inteiro). As caixas de deteção e rótulos acompanham de forma fluida os **intervalos temporais** (`startTime` e `endTime`) injetados via DTO através do método `loadMetadataTimeline()`.
-
-### B6.2 - ZoneEditor (Editor Interativo)
-1. Certifique-se de que o ficheiro `index.html` está configurado com as importações do `b6_zone_editor.ts`.
-2. Inicie o servidor Vite:
-   ```bash
-   npx vite
-   ```
-3. Abra a interface no navegador.
-4. **O que testar (UX/UI):**
-   * **Criar:** Clique esquerdo para desenhar pontos e clique direito (numa área vazia) para fechar o polígono.
-   * **Mover:** Clique esquerdo e arraste para mover um ponto ou a zona inteira.
-   * **Adicionar:** Passe o rato na linha da aresta (ficará branca), clique esquerdo e puxe para criar um novo vértice.
-   * **Apagar:** Clique direito sobre um ponto ou sobre o corpo da zona para excluí-los (com validação anti-cruzamento).
-
----
-
-## 🧪 Executar a Suíte de Testes Unitários (TDD)
-
-Os testes automatizados cobrem as regras críticas de domínio, o motor de validação topológica (`PolygonValidator`) e as exceções da arquitetura. 
-
-Para correr os testes de **ambos os módulos simultaneamente**, execute:
+O contexto de build é a **raiz deste repositório** — o `Dockerfile` copia `CMakeLists.txt`, `include/`, `src/`,
+`tests/`, `tools/`, `third_party/`, `scenarios/` e `video_test/` a partir da raiz.
 
 ```bash
-# Build (testes rodam dentro do builder)
-docker build -t ods/s4-media-evidence:0.1.0 ./mod2/s4-media-evidence
+# Build (os testes rodam dentro do builder; falha de teste quebra a imagem)
+docker build -t ods/s4-media-evidence:0.1.0 .
 
 # Executar (dados persistidos em volume nomeado)
 docker run -d --rm --name s4 -p 8080:8080 -v s4_data:/data ods/s4-media-evidence:0.1.0
 curl http://127.0.0.1:8080/healthz                # {"status": "ok"}
 
 # Ou via docker compose (healthcheck + porta + volume)
-docker compose -f mod2/s4-media-evidence/docker-compose.yml up -d --build
+docker compose up -d --build
 ```
 
-Há ainda um estágio `smoke`, que **não** faz parte da imagem final: ele roda
+> **O alvo padrão do build é a imagem de produção (`runtime`).** O `docker build` sem `--target`
+> usa o último estágio do Dockerfile, e o Dockerfile termina em `FROM runtime AS production`
+> justamente para que a tag `ods/s4-media-evidence:0.1.0` **não** seja a imagem de validação:
+> o estágio `smoke` traz `jq`, `gstreamer1.0-tools` e `avdec_h264` dentro, e uma imagem de
+> produção com ferramentas de teste dentro não é a imagem de produção.
+
+Há ainda o estágio `smoke`, que **não** faz parte da imagem final: ele roda
 `scripts/smoke_e2e.sh` contra a imagem de runtime e falha o build se algo estiver errado — desde o container
 decodificar o MP4 extraído até exigir que duas execuções produzam o mesmo SHA-256. As ferramentas de verificação
 (`jq`, `gstreamer1.0-tools`) ficam só nesse estágio, para não inflar a imagem de produção.
 
 ```bash
 # Verificação de ponta a ponta contra a imagem construída
-docker build --target smoke -t ods/s4-media-evidence:smoke ./mod2/s4-media-evidence
+docker build --target smoke -t ods/s4-media-evidence:smoke .
 ```
 
 O mesmo script roda direto na máquina, sem Docker:
@@ -444,7 +442,7 @@ aceito pelo `h264parse` e pixels decodificados são evidências diferentes.
 
 Detalhes, verificação e instruções para a **Jetson Orin Nano (arm64)** — build nativo na própria Jetson
 ou alternativa com `buildx`/`binfmt` — estão em
-[`docs/PLANO_CONTAINERIZACAO_S4.md`](../../docs/PLANO_CONTAINERIZACAO_S4.md).
+[`docs/PLANO_CONTAINERIZACAO_S4.md`](docs/PLANO_CONTAINERIZACAO_S4.md).
 
 ---
 
@@ -458,19 +456,3 @@ Antes de submeter código ou PR:
 - [x] **Conformidade LGPD**: Entidade `MediaClip` possui controle de tempo de retenção e flag de trava de auditoria (`is_locked_for_audit`).
 - [x] **Testes de Unidade**: Suíte `deve_..._quando_...` passando (unit + integration).
 - [x] **S4.3 — Expurgo LGPD**: prazo de 7 dias + cota FIFO a 85% com trava de auditoria, daemon ligado no `main.cpp` (`test_s4_retention`, `test_s4_retention_runtime`).
-
-npx vitest
-```
-
-### O que cada teste valida:
-
-* **`b6_overlay_player.test.ts` (B6.1):**
-  * Valida o lançamento de exceções rigorosas caso o contentor alvo não seja localizado no DOM.
-  * Verifica a correta montagem estrutural do player e a ordenação cronológica de segurança das timelines baseadas em **intervalos temporais** (`startTime` e `endTime`).
-
-* **`b6_zone_editor.test.ts` (B6.2):**
-  * **Testes de Domínio:** Valida matematicamente que polígonos cruzados (em forma de "gravata") são rejeitados pelo sistema antes da exportação.
-  * **Testes de Estado:** Utilizando fakes de DOM em memória (`jsdom`), garante que sequências complexas de cliques criam, movem e excluem dados de forma segura, respeitando sempre o formato de saída normalizado `[0.0, 1.0]`.
-
-### Dica de Desenvolvimento
-Para manter os testes a correr continuamente em segundo plano (Watch Mode) enquanto escreve código, basta deixar o comando `npx vitest` em execução no terminal. O sistema irá relatar falhas e sucessos em tempo real a cada ficheiro guardado.

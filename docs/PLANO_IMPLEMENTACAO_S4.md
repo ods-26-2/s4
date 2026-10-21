@@ -5,7 +5,7 @@
 
 ## 1. Objetivo
 
-Evoluir `mod2/s4-media-evidence` de scaffold/protótipo para um serviço funcional e testável, fechando as
+Evoluir o componente S4 (neste repositório) de scaffold/protótipo para um serviço funcional e testável, fechando as
 lacunas de conformidade com o Guia de Desenvolvimento. Escopo definido: **S4 completo** (S4.2 e S4.4 reais;
 S4.1 e S4.3 mockados por não serem de responsabilidade do autor). S5 e B6 estão fora do escopo (não existem
 no repositório).
@@ -60,7 +60,7 @@ Também permanece **somente contrato**: `B3EventConsumer` (pub/sub do barramento
 ## 6. Verificação
 
 ```bash
-cmake -S mod2/s4-media-evidence -B build
+cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
@@ -77,6 +77,6 @@ Reavaliar o checklist de conformidade do guia (seção 9) ao final.
 
 ## 7. Dependências e riscos
 
-- cpp-httplib vendido em `mod2/s4-media-evidence/third_party/httplib/httplib.h` (v0.56.0) — download via rede feito uma vez.
+- cpp-httplib vendido em `third_party/httplib/httplib.h` (v0.56.0) — download via rede feito uma vez.
 - Host: Fedora, gcc 16.2.1, CMake 4.3; deps `sqlite-devel`, `openssl-devel`, `libuuid-devel` já instaladas.
 - Limitação conhecida: POIs persistidos em SQLite como texto `x,y,label` separados por `;` (label não pode conter `,` ou `;`).

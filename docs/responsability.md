@@ -5,6 +5,13 @@ Squad: MOD-2 (Mídia, Métricas e Interfaces)
 Componentes: S4 (Evidência de Mídia), S5 (Métricas e Séries Temporais), B6 (Kit de Interface)
 Alvos: NVIDIA Jetson Orin Nano (8 GB RAM) | Barramento B3 | Aplicações A1–A8
 Diretrizes: Clean Code, Design Patterns (GoF), Domain-Driven Design (DDD) & Clean Architecture
+
+> **Nota de escopo (2026-10-21).** Este documento é o guia do squad e descreve a
+> estrutura `mod2/<componente>` recomendada para o monorepo original. O **S4 passou a
+> ter repositório próprio e definitivo**, com a raiz do repositório sendo o próprio
+> componente — não existe mais `mod2/s4-media-evidence/`. Os componentes S5 e B6
+> seguem em repositórios separados. Onde este guia falar de `mod2/s4-media-evidence/`,
+> leia-se "raiz do repositório do S4".
 1. Visão Geral e Responsabilidades do Squad MOD-2
 O Squad MOD-2 é responsável por três grandes pilares do ecossistema ODS 2026/2:
 S4 (Evidência de Mídia — Camada 3): Serviço responsável por gravar contínuamente em buffer de memória, salvar recortes de vídeo

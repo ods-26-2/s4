@@ -3,6 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Alvo explicito: a imagem de producao. Sem isto o compose usaria o
+      # ultimo estágio do Dockerfile, e o smoke (com jq e ferramentas de
+      # verificacao dentro) viraria a imagem do servico.
+      target: runtime
     image: ods/s4-media-evidence:0.1.0
     container_name: s4-media-evidence
     ports:

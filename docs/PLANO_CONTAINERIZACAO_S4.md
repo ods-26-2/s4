@@ -22,7 +22,7 @@ ambiente da máquina de desenvolvimento.
 ## 3. Estrutura de arquivos adicionada
 
 ```
-mod2/s4-media-evidence/
+<raiz do repositório>/
 ├── Dockerfile              # Multi-stage (builder + runtime)
 ├── .dockerignore           # Contexto enxuto (build/, .git, *.db)
 └── docker-compose.yml      # Build + port + volume persistente
@@ -36,6 +36,14 @@ mod2/s4-media-evidence/
 - **`runtime`** (`debian:bookworm-slim`): instala somente libs de runtime (`libsqlite3-0`,
   `libssl3`, `libuuid1`, `libstdc++6`, `curl` para healthcheck); cria usuário não-root `s4`;
   copia o binário `s4_media_evidence`; expõe `8080`; `HEALTHCHECK` via `GET /healthz`.
+- **`smoke`** (a partir do `runtime`): instala `jq` e `gstreamer1.0-tools` e roda
+  `scripts/smoke_e2e.sh` contra a imagem de runtime. **Não** faz parte da imagem publicada:
+  serve só para provar que a imagem de runtime decodifica o MP4 extraído e produz SHA-256
+  repetível. Pedir com `--target smoke`.
+- **`production`** (`FROM runtime AS production`): existe para ser o **último** estágio do
+  Dockerfile, porque o `docker build` sem `--target` usa o último estágio. Sem ele, a tag
+  `ods/s4-media-evidence:0.1.0` apontaria para a imagem de validação, com `jq` e
+  `gstreamer1.0-tools` dentro — e o `docker-compose` subiria o serviço a partir dela.
 
 Binário resultado: `CMD ["/app/s4_media_evidence", "--port", "8080", "--db", "/data/s4.db", "--media-dir", "/data/media"]`
 → banco SQLite e clipes ficam em volume montado em `/data` (não-no-runtime).
@@ -48,7 +56,7 @@ Adiciona rota `GET /healthz` → `200 {"status":"ok"}` em `ClipDescriptorHttpSer
 ## 6. Verificação (host x86_64)
 
 ```bash
-docker build -t ods/s4-media-evidence:0.1.0 ./mod2/s4-media-evidence
+docker build -t ods/s4-media-evidence:0.1.0 .
 docker run --rm -p 8080:8080 --name s4-test ods/s4-media-evidence:0.1.0 &
 curl -sf http://127.0.0.1:8080/healthz
 curl -s http://127.0.0.1:8080/api/v1/clips/<clip_id>     # 200 + JSON DTO
@@ -61,7 +69,7 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/events \
 docker cp s4-test:/data/media/event-demo.mp4 /tmp/      # conferir hash real
 sha256sum /tmp/event-demo.mp4                            # == sha256_hash do JSON
 docker stop s4-test
-docker compose -f mod2/s4-media-evidence/docker-compose.yml up --build -d
+docker compose up --build -d
 ```
 
 O `ctest` roda dentro do `builder` a cada build → falha de teste quebra a imagem.

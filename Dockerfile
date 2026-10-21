@@ -147,3 +147,13 @@ USER s4
 # O script sobe dois daemons, sobe o replay, extrai um clipe, checa a API e
 # compara o hash entre as duas execucoes. Qualquer falha quebra o build.
 RUN /app/scripts/smoke_e2e.sh /app/s4_media_evidence
+
+# ---------- Estágio 4: imagem de produção (alvo padrão do build) -----------
+# O `docker build` sem --target usa o ÚLTIMO estágio do Dockerfile. Como o
+# smoke vem depois do runtime, sem este estágio final a tag
+# ods/s4-media-evidence:0.1.0 apontaria para a imagem de VALIDAÇÃO: 1,6 GB,
+# com jq, gstreamer1.0-tools e avdec_h264 dentro, enquanto o README e o
+# docker-compose descrevem a tag como a imagem de produção enxuta. O estágio
+# smoke continua existindo e continua acessível com --target smoke; o que muda
+# é só qual imagem nasce quando ninguém pede nada.
+FROM runtime AS production

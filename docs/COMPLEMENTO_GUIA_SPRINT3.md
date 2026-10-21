@@ -110,15 +110,19 @@ Em linha com a seção 3 do guia (bounded context + especialização de stack).
 
 Complementa a seção 8 (Estratégia de Testes) e a seção 9 (Checklist) do guia.
 
+> Este plano cobre o **squad inteiro**. A partir de 21/10/2026 o S4 tem repositório
+> próprio e definitivo (este), e S5/B6 seguem em repositórios separados — por isso
+> só o bloco do S4 é executável aqui.
+
 ```bash
-# S4 (C++)
-cmake -S mod2/s4-media-evidence -B build && cmake --build build
+# S4 (C++) — neste repositório
+cmake -S . -B build && cmake --build build
 ctest --test-dir build --output-on-failure
 
-# S5 (Python)
+# S5 (Python) — repositório do S5
 pytest
 
-# B6 (TypeScript)
+# B6 (TypeScript) — repositório do B6
 npx vitest
 ```
 
