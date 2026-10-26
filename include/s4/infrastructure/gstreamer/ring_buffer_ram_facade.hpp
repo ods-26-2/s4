@@ -17,6 +17,7 @@
 #include "s4/domain/repositories/frame_store.hpp"
 #include "s4/domain/services/frame_source.hpp"
 #include "s4/domain/services/media_buffer_reader.hpp"
+#include "s4/domain/value_objects/session_started.hpp"
 #include "s4/infrastructure/gstreamer/ram_buffer_facade.hpp"
 #include "s4/infrastructure/ringbuffer/capture_clock_bridge.hpp"
 
@@ -38,6 +39,13 @@ namespace ods::s4::infrastructure {
 //   * espera pelo pos-evento, que no instante do evento ainda nao foi capturado;
 //   * rejeicao de relogio retrocedendo e reinicio por troca de sessao (B2);
 //   * bytes em /dev/shm, legiveis por outro processo sem copia.
+//
+// Arquitetura 6c (pendencias do S4.1):
+//   * indice pelo captured_at oficial quando a fonte traz ods.p4.frame;
+//   * sessao oficial: quadros de P4 trazem o session_id, e onSessionStarted()
+//     zera o buffer no marcador ods.session.started (SEEK, LOOP, RESTART);
+//   * OUT_OF_BUFFER tipado e limite de post_s no caminho por relogio de captura;
+//   * profundidade validada contra o que as regras da build exigem.
 class RingBufferRAMFacade
     : public IRAMBufferFacade
     , public domain::IMediaBufferReader
@@ -64,6 +72,10 @@ public:
 
     // --- IRAMBufferFacade ---------------------------------------------------
 
+    // Lanca InsufficientBufferDepthError se config.depthRequirement existir e
+    // config.windowSeconds nao o cobrir: e melhor nao subir do que gravar clipes
+    // sem o comeco.
+    //
     // pipelineDesc e repassado a fonte quando ela for um pipeline GStreamer;
     // fontes sintetica e de replay o ignoram (ja sabem o que reproduzir).
     void startCapture(const std::string& pipelineDesc) override;
@@ -99,10 +111,39 @@ public:
         double waitTimeoutSeconds = 0.0
     );
 
+    // Erros (todos OutOfBufferError, codigo OUT_OF_BUFFER da 6c):
+    //   * WindowNotInBufferError — a janela ja saiu do buffer (fim anterior ao
+    //     quadro mais antigo) ou nao ha quadro nela;
+    //   * PostWindowTooLongError — o fim esta mais de maxPostSeconds a frente
+    //     do quadro mais recente;
+    //   * OutOfBufferError — a sessao mudou enquanto o pos-evento era esperado
+    //     (o "antes" foi descartado junto com a sessao).
+    // Uma janela que so COMECA antes do quadro mais antigo e entregue com
+    // isTruncatedAtStart: a evidencia do evento ainda esta la.
     [[nodiscard]] application::ExtractedSegment extractCaptureWindow(
         const domain::CaptureWindow& window,
         double waitTimeoutSeconds = 0.0
     );
+
+    // --- sessao oficial (6c, ods.session.started) ---------------------------
+
+    // Chamado por quem consome o barramento (S4.2) ao receber o marcador.
+    // Ignora marcadores de outras fontes, a sessao corrente e sessoes ja
+    // encerradas. Devolve true se o buffer foi zerado.
+    bool onSessionStarted(const domain::SessionStarted& marker);
+
+    // Sessao que quadros sem session_id proprio herdam: a ultima anunciada por
+    // ods.session.started, ou "<cameraId>-local" antes do primeiro marcador.
+    [[nodiscard]] std::string inheritedSessionId() const;
+
+    // Relogio de parede -> relogio de captura, pelo mesmo ponto unico. Com a
+    // base oficial (CapturedAtUtc) e identidade: um started_at ou start_at da
+    // 6c vira capture_ts sem ajuste.
+    [[nodiscard]] domain::Nanoseconds toCaptureTsNs(
+        std::chrono::system_clock::time_point wallClock
+    ) const;
+
+    [[nodiscard]] domain::CaptureTimeBase timeBase() const { return m_clock.timeBase(); }
 
     // --- inspecao -----------------------------------------------------------
 
@@ -138,7 +179,10 @@ public:
 
 private:
     void onFrame(const domain::CapturedFrame& frame);
+    void ingest(const domain::CapturedFrame& frame);
     [[nodiscard]] bool hasReached(domain::Nanoseconds targetTsNs) const;
+    void rejectIfDepthInsufficient() const;
+    void rejectIfOutOfBuffer(const domain::CaptureWindow& window) const;
 
     application::RingBufferConfig m_config;
     std::unique_ptr<domain::IFrameSource> m_source;
@@ -154,6 +198,10 @@ private:
     mutable std::condition_variable m_frameArrived;
     std::atomic<bool> m_isCapturing{false};
     std::atomic<std::uint64_t> m_framesRejectedTotal{0};
+    // Protegidos por m_mutex. A geracao muda a cada troca de sessao: uma
+    // extracao que dormiu numa sessao e acordou em outra nao tem mais o "antes".
+    std::uint64_t m_sessionGeneration{0};
+    std::string m_announcedSessionId;
 };
 
 } // namespace ods::s4::infrastructure

@@ -82,6 +82,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 # O runtime precisa dos mesmos plugins que o builder. O h264parse (plugins
 # -bad) e obrigatorio porque e ele que converte o sample em access unit
 # alinhada, que e o formato que o ring buffer assume.
+#
+# plugins-ugly traz o x264enc: na arquitetura 6c o S4 recebe quadros CRUS de P4
+# e codifica por software, porque a Jetson Orin Nano nao tem NVENC. Sem ele os
+# modos --p4-fake/--p4-shm nao sobem (S4.1, item 1). O shmsrc vem do -bad.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libsqlite3-0 \
         libssl3 \
@@ -92,6 +96,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gstreamer1.0-plugins-base \
         gstreamer1.0-plugins-good \
         gstreamer1.0-plugins-bad \
+        gstreamer1.0-plugins-ugly \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 s4 \
     && mkdir -p /data/media \

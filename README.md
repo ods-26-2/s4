@@ -70,6 +70,7 @@ O projeto adota os princípios de **Clean Architecture**, **Domain-Driven Design
 │   ├── infrastructure/         # hashing, database, filesystem, gstreamer
 │   └── main.cpp                # Daemon demo executável
 ├── tools/                      # record_scenario: grava um cenário em .idx/.bin
+│                               # measure_encoder: CPU do x264enc e RAM do buffer (placa)
 ├── scripts/smoke_e2e.sh        # Verificação E2E de ponta a ponta
 └── tests/                      # Suíte de testes automatizados
     ├── unit/                   # Testes puros (domínio, casamento de uso, hash, ISO-BMFF)
@@ -81,7 +82,7 @@ O projeto adota os princípios de **Clean Architecture**, **Domain-Driven Design
 | Documento | Para quê |
 | :--- | :--- |
 | [`docs/S4.4-demo-replay-e2e.md`](docs/S4.4-demo-replay-e2e.md) | **Guia de demonstração**: mostrar o fluxo do MP4 real ao artefato indexado, passo a passo. |
-| [`docs/S4.1-ring-buffer.md`](docs/S4.1-ring-buffer.md) | Detalhes do ring buffer: arena, evicção, ponte de relógios. |
+| [`docs/S4.1-ring-buffer.md`](docs/S4.1-ring-buffer.md) | Detalhes do ring buffer: arena, evicção, ponte de relógios; seção 12 = pendências da 6c (encoder, P4, `captured_at`, sessão, profundidade, `OUT_OF_BUFFER`). |
 
 ---
 
@@ -107,9 +108,11 @@ está em [`docs/S4.1-ring-buffer.md`](docs/S4.1-ring-buffer.md).
 
 | Entrada | De onde vem | Formato |
 | :--- | :--- | :--- |
-| **Quadros de vídeo** | Câmera (P4) via GStreamer `appsink`, replay gravado (P6) ou fonte sintética (demo/testes) | `CapturedFrame { captureTsNs, data, length, isKeyframe, sessionId }` — H.264 Annex-B, 1 quadro por chamada |
-| **Pedido de trecho** | S4.2 (`ExtractClipUseCase`), disparado pelo `POST /api/v1/events` ou pelo barramento B3 | `readWindow(start, end)` em relógio de parede, ou `extractAround(tsEvento, preSeg, posSeg, timeout)` em relógio de captura |
-| **Configuração** | Build da aplicação | `RingBufferConfig { cameraId, windowSeconds, bitrateBps, safetyFactor, width, height, replaceStaleSegment }` |
+| **Quadros de vídeo (6c)** | P4 ao vivo / P6 em replay: quadro **cru** (NV12) + metadados `ods.p4.frame`; o S4 codifica com `x264enc` (a Orin Nano não tem NVENC) | `P4RawFrameEncoderSource::submit(metadata, bytes)`, ou NV12 via `shmsink` (`p4RawShmPipeline`) |
+| **Quadros de vídeo (demais)** | Replay de `.mp4`, cenário gravado ou fonte sintética (demo/testes) | `CapturedFrame { captureTsNs, data, length, isKeyframe, sessionId, timeBase }` — H.264 Annex-B, 1 quadro por chamada |
+| **Marcador de sessão** | `ods.session.started`, entregue pelo consumidor B3 (S4.2) | `onSessionStarted(SessionStarted)`: zera o buffer em SEEK/LOOP/RESTART |
+| **Pedido de trecho** | S4.2 (`ExtractClipUseCase`), disparado pelo `POST /api/v1/events` ou pelo barramento B3 | `readWindow(start, end)` em relógio de parede, ou `extractAround(tsEvento, preSeg, posSeg, timeout)` em relógio de captura (com `captured_at` de P4, é o próprio UTC) |
+| **Configuração** | Build da aplicação | `RingBufferConfig { cameraId, windowSeconds, bitrateBps, safetyFactor, width, height, replaceStaleSegment, maxPostSeconds, depthRequirement }` |
 
 ### O que faz
 
@@ -128,7 +131,8 @@ está em [`docs/S4.1-ring-buffer.md`](docs/S4.1-ring-buffer.md).
 
 | Saída | Para quem | Conteúdo |
 | :--- | :--- | :--- |
-| `std::vector<std::vector<uint8_t>>` (`readWindow`) | S4.2, via porta `IMediaBufferReader` | Payloads H.264 da janela, começando em keyframe. **Lista vazia** se a janela não está no buffer ou se a captura já foi parada (o S4.2 converte em `MediaBufferEmptyError` → HTTP 500). |
+| `std::vector<std::vector<uint8_t>>` (`readWindow`) | S4.2, via porta `IMediaBufferReader` | Payloads H.264 da janela, começando em keyframe. **Lista vazia** se a janela não está no buffer ou se a captura já foi parada (o S4.2 converte em `MediaBufferEmptyError` → HTTP 500). Contrato legado, mantido. |
+| `OutOfBufferError` (`extractCaptureWindow`) | S4.2 / S4.4 | Código `OUT_OF_BUFFER` da 6c: janela já expulsa, fim além do `maxPostSeconds`, ou sessão trocada durante a espera. Recusado **antes** de esperar; HTTP **422** `{"status":"ERROR","error":{"code":"OUT_OF_BUFFER",…}}` |
 | `std::vector<VideoFrame>` (`extractWindow`) | S4.2, via `IRAMBufferFacade` | Os mesmos quadros, com timestamp de parede e dimensões |
 | `ExtractedSegment` (`extractAround`) | Quem conhece o relógio de captura | Quadros + `sessionId` + flags `isTruncatedAtStart` / `isTruncatedAtEnd` |
 | `BufferStats` (`stats()`) | Observabilidade | Quadros guardados, segundos cobertos, bytes usados, total ingerido/expulso/rejeitado |
@@ -171,7 +175,7 @@ no relógio de captura — uma janela ancorada no instante mais recente esperari
 
 | Verificação | Resultado |
 | :--- | :--- |
-| `ctest` (13 suítes) | 13/13, estáveis em execuções repetidas. Duas podem sair **Skipped** (`77`) em vez de aprovadas: `test_s4_replay_e2e`, sem MP4 em `video_test/`, e `test_s4_gstreamer_capture`, sem `x264enc`/`avdec_h264`. Skipped é o resultado honesto para "não executado"; para reprovar nesses casos, `-DODS_S4_REQUIRE_SAMPLE_VIDEO=ON` |
+| `ctest` (15 suítes) | 15/15, estáveis em execuções repetidas. Três podem sair **Skipped** (`77`) em vez de aprovadas: `test_s4_replay_e2e`, sem MP4 em `video_test/`, e `test_s4_gstreamer_capture`/`test_s4_p4_input`, sem `x264enc`/`avdec_h264`. Skipped é o resultado honesto para "não executado"; para reprovar nesses casos, `-DODS_S4_REQUIRE_SAMPLE_VIDEO=ON` |
 | E2E com MP4 real: replay → evento → extração | `201`; container aceito por `qtdemux ! h264parse ! fakesink` |
 | SHA-256 do artefato | igual ao publicado no descritor **e igual entre execuções** do mesmo material |
 | Mesma extração em máquina distinta | hash idêntico dentro do container Debian e no host |
@@ -287,8 +291,8 @@ Os testes de unidade seguem a convenção `deve_[resultado]_quando_[condicao]`. 
 ctest --test-dir build --output-on-failure
 ```
 
-São 13 suítes. Duas podem sair **Skipped** (`77`) em vez de aprovadas: `test_s4_replay_e2e`, sem MP4 em
-`video_test/` ou sem GStreamer, e `test_s4_gstreamer_capture`, sem `x264enc`/`avdec_h264`. Skipped é o resultado
+São 15 suítes. Três podem sair **Skipped** (`77`) em vez de aprovadas: `test_s4_replay_e2e`, sem MP4 em
+`video_test/` ou sem GStreamer, e `test_s4_gstreamer_capture` e `test_s4_p4_input`, sem `x264enc`/`avdec_h264`. Skipped é o resultado
 honesto para "não executado"; para reprovar nesses casos, `-DODS_S4_REQUIRE_SAMPLE_VIDEO=ON`.
 
 ### Executando o Serviço (daemon demo)
@@ -315,10 +319,20 @@ que comprova o fluxo completo:
 | `--db PATH` | `/tmp/s4_media_evidence.db` | Banco SQLite dos descritores. |
 | `--media-dir PATH` | `/tmp/s4_media_evidence` | Onde os clipes são gravados. |
 | `--source FILE` | — | Replay de um MP4 H.264 existente, em vez da fonte sintética. |
+| `--p4-fake` | desligado | S4.1/6c: P4 falso em processo (NV12 + `ods.p4.frame` + `ods.session.started`), codificado pelo `x264enc`. Produz MP4 de verdade com `captured_at` e sessão oficiais. |
+| `--p4-shm SOCKET` | — | S4.1/6c: NV12 cru de P4 via `shmsink`, codificado pelo `x264enc`; a sessão vem do marcador. |
+| `--width/--height/--fps` | `1280`/`720`/`30` | Formato combinado com P4 nos modos `--p4-*`. |
+| `--encoder-preset NAME` | `ultrafast` | Preset do `x264enc` (`ultrafast`…`fast`). |
+| `--encoder-bitrate BPS` | `4000000` | Bitrate do `x264enc`; dimensiona o buffer nos modos `--p4-*`. |
+| `--gop N` / `--encoder-threads N` | `30` / `0` | Quadros entre keyframes; threads do x264 (`0` = automático). |
+| `--pre-roll-seconds N` | `5` | Pré-rolagem dos clipes (profundidade, item 5). |
+| `--max-rule-persistence-seconds N` | `8` | Maior `min_duration_ms + debounce_ms` entre as regras da build. |
+| `--event-latency-seconds N` | `2` | Folga de entrega do evento S2 → S4. |
+| `--max-post-seconds N` | `10` | `post_s` máximo; acima disso, `OUT_OF_BUFFER`. |
 | `--scenario` | desligado | Na subida, espera o ring buffer ter material e extrai um clipe de demonstração, imprimindo o descritor. Só produz MP4 com `--source`: a fonte sintética alimenta bytes que não são H.264 codificado, e o muxer avisa isso em vez de gravar um arquivo que só parece vídeo. |
 | `--camera ID` | `cam0` | Identificador da câmera (vira o nome do segmento em `/dev/shm`). |
-| `--window-seconds N` | `30` | Segundos de ring buffer. |
-| `--bitrate BPS` | `134400` | Bitrate nominal, usado para dimensionar o ring buffer. |
+| `--window-seconds N` | maior entre `30` e a profundidade exigida | Segundos de ring buffer. Explícito e menor que pré-rolagem + persistência + latência + post_s + GOP: o daemon recusa subir. |
+| `--bitrate BPS` | `134400` | Bitrate nominal, usado para dimensionar o ring buffer em `--source`/sintética. |
 
 O daemon inicia o ring buffer e expõe a API:
 
@@ -363,7 +377,8 @@ curl -X POST http://127.0.0.1:8080/api/v1/events \
 ```
 
 - `event_id` ausente → gerado automaticamente (`event-<uuid>`); deve conter apenas `[A-Za-z0-9_-]`.
-- Janela inválida (`start_ms >= end_ms`) → `400`; janela sem frames no buffer → `500`.
+- Janela inválida (`start_ms >= end_ms`) → `400`; janela sem frames no buffer → `500` (caminho legado, `start_ms`/`end_ms`).
+- Pelo relógio de captura (`capture_ts_ns`): janela já expulsa do buffer ou com fim além do `post_s` máximo → `422` com `{"status":"ERROR","error":{"code":"OUT_OF_BUFFER","message":…}}` (6c).
 
 O estado atual do ring buffer, incluindo o intervalo do relógio de captura, fica em
 `GET /api/v1/buffer/stats` — é o que permite escolher um `capture_ts_ns` válido:

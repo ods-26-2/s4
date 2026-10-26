@@ -1,6 +1,7 @@
 #include "s4/presentation/http/clip_descriptor_http_server.hpp"
 
 #include "s4/application/dtos/clip_descriptor_dto.hpp"
+#include "s4/domain/errors/domain_error.hpp"
 #include "s4/presentation/http/clip_descriptor_controller.hpp"
 
 #include "httplib.h"
@@ -424,6 +425,19 @@ ClipDescriptorHttpServer::ClipDescriptorHttpServer(
                     response.status = 400;
                     response.set_content(
                         "{\"error\":\"" + json_escape(error.what()) + "\"}",
+                        "application/json"
+                    );
+                } catch (const domain::OutOfBufferError& error) {
+                    // S4.1 / 6c (ods.s4.capture.command): janela ja expulsa do
+                    // buffer, ou com fim alem do post_s maximo, e erro tipado do
+                    // pedido, nao falha do servidor. Corpo no formato comum de
+                    // reply da 6c. So o caminho por relogio de captura chega
+                    // aqui; o legado (start_ms/end_ms) segue com lista vazia -> 500.
+                    response.status = 422;
+                    response.set_content(
+                        std::string("{\"status\":\"ERROR\",\"error\":{\"code\":\"") +
+                            domain::OutOfBufferError::kCode + "\",\"message\":\"" +
+                            json_escape(error.what()) + "\"}}",
                         "application/json"
                     );
                 } catch (const std::exception& error) {

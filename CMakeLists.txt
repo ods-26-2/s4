@@ -145,6 +145,10 @@ endif()
 add_executable(s4_record_scenario tools/record_scenario.cpp)
 target_link_libraries(s4_record_scenario PRIVATE s4_media_evidence_lib)
 
+# S4.1 item 1: CPU do x264enc e RAM do buffer, medidos na placa.
+add_executable(s4_measure_encoder tools/measure_encoder.cpp)
+target_link_libraries(s4_measure_encoder PRIVATE s4_media_evidence_lib)
+
 # Testing
 enable_testing()
 
@@ -187,3 +191,11 @@ set_tests_properties(test_s4_gstreamer_capture PROPERTIES SKIP_RETURN_CODE 77)
 
 s4_add_test(test_s4_retention tests/unit/test_retention.cpp)
 s4_add_test(test_s4_retention_runtime tests/integration/test_retention_runtime.cpp)
+
+# S4.1 na arquitetura 6c: quadros crus de P4 + x264enc, captured_at e sessao
+# oficiais. Sem GStreamer ou sem x264enc/avdec_h264/shm sai com 77 (Skipped).
+s4_add_test(test_s4_p4_input tests/integration/test_p4_input.cpp)
+set_tests_properties(test_s4_p4_input PROPERTIES SKIP_RETURN_CODE 77)
+
+# OUT_OF_BUFFER tipado no POST /api/v1/events (caminho por relogio de captura).
+s4_add_test(test_s4_out_of_buffer_http tests/integration/test_out_of_buffer_http.cpp)

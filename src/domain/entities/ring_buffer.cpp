@@ -1,8 +1,18 @@
 #include "s4/domain/entities/ring_buffer.hpp"
 
+#include <algorithm>
 #include <string>
 
 namespace ods::s4::domain {
+
+namespace {
+
+// Quantas sessoes encerradas lembrar. Um quadro so chega atrasado enquanto
+// esta em transito no pipeline (fracoes de segundo); oito trocas seguidas
+// nesse intervalo ja seriam um replay fora de controle.
+constexpr std::size_t kEndedSessionsRemembered = 8;
+
+} // namespace
 
 RingBuffer::RingBuffer(BufferCapacity capacity) : m_capacity(capacity.totalBytes()) {}
 
@@ -15,6 +25,7 @@ Allocation RingBuffer::allocate(
     const std::string& sessionId
 ) {
     rejectIfTooLarge(length);
+    rejectIfSessionEnded(sessionId);
     const bool sessionRestarted = switchSessionIfNeeded(sessionId);
     rejectIfClockWentBackwards(captureTsNs);
     const std::size_t offset = offsetFor(length);
@@ -35,6 +46,16 @@ void RingBuffer::rejectIfTooLarge(std::size_t length) const {
     }
 }
 
+// Um quadro atrasado da sessao que ja acabou nao pode reabri-la: isso zeraria
+// o buffer da sessao nova e, no quadro seguinte, zeraria de novo.
+void RingBuffer::rejectIfSessionEnded(const std::string& sessionId) const {
+    if (hasEnded(sessionId)) {
+        throw StaleSessionFrameError(
+            "frame of ended session " + sessionId + " arrived after session " + m_sessionId
+        );
+    }
+}
+
 // Sessao nova (replay, busca, reinicio) invalida o buffer inteiro: B2 exige que
 // busca/laco/reinicio gerem sessao nova, e misturar quadros de duas sessoes
 // produziria um clipe com salto de tempo invisivel.
@@ -47,11 +68,37 @@ bool RingBuffer::switchSessionIfNeeded(const std::string& sessionId) {
     if (m_sessionId == sessionId) {
         return false;
     }
+    restartWith(sessionId);
+    return true;
+}
+
+bool RingBuffer::startSession(const std::string& sessionId) {
+    if ((m_hasSession && m_sessionId == sessionId) || hasEnded(sessionId)) {
+        return false;
+    }
+    if (!m_hasSession) {
+        m_hasSession = true;
+        m_sessionId = sessionId;
+        return false;
+    }
+    restartWith(sessionId);
+    return true;
+}
+
+void RingBuffer::restartWith(const std::string& sessionId) {
+    m_endedSessions.push_back(m_sessionId);
+    if (m_endedSessions.size() > kEndedSessionsRemembered) {
+        m_endedSessions.pop_front();
+    }
     m_evictedTotal += m_frames.size();
     m_frames.clear();
     m_writeOffset = 0;
     m_sessionId = sessionId;
-    return true;
+}
+
+bool RingBuffer::hasEnded(const std::string& sessionId) const {
+    return std::find(m_endedSessions.begin(), m_endedSessions.end(), sessionId) !=
+           m_endedSessions.end();
 }
 
 void RingBuffer::rejectIfClockWentBackwards(Nanoseconds captureTsNs) const {

@@ -34,23 +34,37 @@ std::string quoted(const std::string& value) {
 } // namespace
 
 std::string GStreamerAppsinkFrameSource::jetsonCsiH264Pipeline(const CsiCameraOptions& o) {
+    // nvvidconv copia o quadro da memoria NVMM (ISP) para memoria de sistema,
+    // que e onde o x264enc le. O nvv4l2h264enc que estava aqui depende do NVENC,
+    // que a Orin Nano nao tem.
+    const domain::RawVideoFormat format(
+        static_cast<std::uint32_t>(o.width), static_cast<std::uint32_t>(o.height), o.fps
+    );
     return "nvarguscamerasrc sensor-id=" + std::to_string(o.sensorId) +
            " ! video/x-raw(memory:NVMM),width=" + std::to_string(o.width) +
            ",height=" + std::to_string(o.height) + ",framerate=" + std::to_string(o.fps) +
-           "/1 ! nvv4l2h264enc bitrate=" + std::to_string(o.bitrateBps) +
-           " iframeinterval=" + std::to_string(o.gop) +
-           " idrinterval=" + std::to_string(o.gop) +
-           // insert-sps-pps + config-interval=-1 repetem os parametros do codec
-           // em TODO keyframe; sem isso, um trecho que comeca no meio do stream
-           // nao tem como ser decodificado.
-           " insert-sps-pps=true ! h264parse config-interval=-1 ! " + kH264Caps + " ! " +
-           kAppsinkTail;
+           "/1 ! nvvidconv ! " + raw_video_caps(format) + " ! " +
+           // h264parse config-interval=-1 repete SPS/PPS em TODO keyframe; sem
+           // isso, um trecho que comeca no meio do stream nao decodifica.
+           raw_to_h264_chain(format, o.encoder) + " ! " + kAppsinkTail;
 }
 
 std::string GStreamerAppsinkFrameSource::shmH264Pipeline(const std::string& socketPath) {
     return "shmsrc socket-path=" + quoted(socketPath) +
            " is-live=true do-timestamp=true ! h264parse config-interval=-1 ! " + kH264Caps +
            " ! " + kAppsinkTail;
+}
+
+std::string GStreamerAppsinkFrameSource::p4RawShmPipeline(
+    const std::string& socketPath,
+    const domain::RawVideoFormat& format,
+    const SoftwareH264EncoderSettings& encoder
+) {
+    // shmsrc nao anuncia caps: o filtro logo depois diz ao x264enc a geometria
+    // combinada com P4. Cada buffer do shmsink e um quadro inteiro.
+    return "shmsrc socket-path=" + quoted(socketPath) +
+           " is-live=true do-timestamp=true ! " + raw_video_caps(format) + " ! " +
+           raw_to_h264_chain(format, encoder) + " ! " + kAppsinkTail;
 }
 
 std::string GStreamerAppsinkFrameSource::fileReplayH264Pipeline(const std::string& path) {
@@ -66,8 +80,9 @@ std::string GStreamerAppsinkFrameSource::testPatternH264Pipeline(
     // em varias imagens). A propriedade do intervalo de keyframes chama-se
     // gop-size; sem ela o stream sairia com um unico IDR e o S4.1 nunca
     // encontraria um keyframe para alinhar o inicio do trecho.
-    // Na Jetson este caminho nao e o de producao: a camera usa
-    // jetsonCsiH264Pipeline(), com o encoder de hardware NVENC.
+    // Na Jetson este caminho nao e o de producao: na 6c os quadros vem crus de
+    // P4 e sao codificados pelo x264enc (P4RawFrameEncoderSource ou
+    // p4RawShmPipeline()).
     return "videotestsrc is-live=true ! video/x-raw,width=" + std::to_string(width) +
            ",height=" + std::to_string(height) + ",framerate=" + std::to_string(fps) +
            "/1 ! openh264enc bitrate=" + std::to_string(bitrateKbps * 1000) +
@@ -82,6 +97,8 @@ std::string GStreamerAppsinkFrameSource::testPatternH264Pipeline(
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
 
+#include "s4/infrastructure/gstreamer/gst_capture_timestamp.hpp"
+
 namespace ods::s4::infrastructure {
 
 struct GStreamerAppsinkFrameSource::Impl {
@@ -93,9 +110,8 @@ struct GStreamerAppsinkFrameSource::Impl {
     std::string sessionId;
 };
 
-namespace {
-
-// capture_ts = base_time do pipeline + timestamp do buffer (relogio monotonico).
+// Sem o meta, capture_ts = base_time do pipeline + timestamp do buffer
+// (relogio monotonico do GStreamer).
 //
 // Usa o DTS quando ele existe: o buffer guarda os quadros em ORDEM DE
 // DECODIFICACAO, que e a ordem em que o appsink os entrega e a unica em que a
@@ -105,26 +121,39 @@ namespace {
 // descartando qualquer quadro com captureTs menor que o ultimo: 2 de cada 3
 // quadros desse video seriam rejeitados. O DTS e monotonico na ordem de
 // decodificacao, que e exatamente a ordem em que os access units saem do
-// demuxer. Sem B-frames, que e o caso do NVENC de P4, DTS e PTS coincidem e o
-// valor continua sendo o instante de captura; fonte sem DTS cai no PTS.
+// demuxer. Sem B-frames, que e o caso do x264enc do S4.1, DTS e PTS coincidem e
+// o valor continua sendo o instante de captura; fonte sem DTS cai no PTS.
 //
 // Quadro sem DTS E sem PTS e descartado: nao ha onde posiciona-lo na linha do
 // tempo, e carimba-lo com o base_time do pipeline o colocaria no comeco da
 // gravacao -- o RingBuffer o rejeitaria como relogio retrocedendo e a perda
 // seria silenciosa.
 //
-// Ponto de acoplamento com B2: quando TRA-1/TRA-2 fecharem a base de tempo
-// oficial (por exemplo o timestamp que P4 grava via GstReferenceTimestampMeta),
-// basta trocar esta funcao.
-std::optional<domain::Nanoseconds> capture_timestamp(GstElement* pipeline, GstBuffer* buffer) {
+// O meta "timestamp/x-unix" e a base de tempo oficial de B2 (captured_at): e a
+// troca que este comentario anunciava quando TRA-1/TRA-2 fechassem a base.
+std::optional<CaptureInstant> capture_instant_of(GstClockTime pipelineBaseTime, GstBuffer* buffer) {
+    static GstCaps* const unixReference = gst_caps_new_empty_simple(kUnixTimestampReference);
+    const GstReferenceTimestampMeta* reference =
+        gst_buffer_get_reference_timestamp_meta(buffer, unixReference);
+    if (reference != nullptr && GST_CLOCK_TIME_IS_VALID(reference->timestamp)) {
+        return CaptureInstant{
+            static_cast<domain::Nanoseconds>(reference->timestamp),
+            domain::CaptureTimeBase::CapturedAtUtc
+        };
+    }
     const GstClockTime bufferTime =
         GST_BUFFER_DTS_IS_VALID(buffer) ? GST_BUFFER_DTS(buffer) : GST_BUFFER_PTS(buffer);
     if (!GST_CLOCK_TIME_IS_VALID(bufferTime)) {
         return std::nullopt;
     }
-    return static_cast<domain::Nanoseconds>(gst_element_get_base_time(pipeline)) +
-           static_cast<domain::Nanoseconds>(bufferTime);
+    return CaptureInstant{
+        static_cast<domain::Nanoseconds>(pipelineBaseTime) +
+            static_cast<domain::Nanoseconds>(bufferTime),
+        domain::CaptureTimeBase::SourceClock
+    };
 }
+
+namespace {
 
 GstFlowReturn on_new_sample(GstAppSink* sink, gpointer userData) {
     auto* impl = static_cast<GStreamerAppsinkFrameSource::Impl*>(userData);
@@ -133,8 +162,9 @@ GstFlowReturn on_new_sample(GstAppSink* sink, gpointer userData) {
         return GST_FLOW_ERROR;
     }
     GstBuffer* buffer = gst_sample_get_buffer(sample);
-    const std::optional<domain::Nanoseconds> captureTsNs = capture_timestamp(impl->pipeline, buffer);
-    if (!captureTsNs.has_value()) {
+    const std::optional<CaptureInstant> instant =
+        capture_instant_of(gst_element_get_base_time(impl->pipeline), buffer);
+    if (!instant.has_value()) {
         // Sem DTS nem PTS nao ha como posicionar o quadro na linha do tempo.
         std::fprintf(stderr, "[S4.1] frame without timestamp dropped\n");
         gst_sample_unref(sample);
@@ -147,7 +177,8 @@ GstFlowReturn on_new_sample(GstAppSink* sink, gpointer userData) {
     }
 
     domain::CapturedFrame frame;
-    frame.captureTsNs = *captureTsNs;
+    frame.captureTsNs = instant->captureTsNs;
+    frame.timeBase = instant->timeBase;
     frame.data = static_cast<const std::uint8_t*>(info.data);
     frame.length = info.size;
     // Sem a flag DELTA_UNIT o buffer e um keyframe.

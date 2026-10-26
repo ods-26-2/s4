@@ -72,6 +72,16 @@ public:
         const std::string& sessionId
     );
 
+    // ods.session.started: abre a sessao na hora, sem esperar o primeiro
+    // quadro dela. Zera o buffer e passa a recusar quadros atrasados da sessao
+    // encerrada — em SEEK e LOOP o captured_at volta, e sem isso a troca so
+    // seria percebida quando o primeiro quadro novo chegasse.
+    //
+    // Idempotente: a sessao corrente (quadros dela podem ter chegado antes do
+    // marcador) e as ja encerradas (marcador reentregue fora de ordem) nao
+    // mexem no buffer. Devolve true se o buffer foi zerado.
+    bool startSession(const std::string& sessionId);
+
     // --- leitura ------------------------------------------------------------
 
     // Descritores decodificaveis que cobrem a janela, com flags de truncamento.
@@ -80,6 +90,8 @@ public:
     // --- inspecao -----------------------------------------------------------
 
     [[nodiscard]] bool empty() const noexcept { return m_frames.empty(); }
+    [[nodiscard]] const std::string& sessionId() const noexcept { return m_sessionId; }
+    [[nodiscard]] bool hasEnded(const std::string& sessionId) const;
     [[nodiscard]] Nanoseconds newestCaptureTsNs() const;
     [[nodiscard]] Nanoseconds oldestCaptureTsNs() const;
     [[nodiscard]] const std::deque<FrameDescriptor>& frames() const noexcept { return m_frames; }
@@ -87,7 +99,9 @@ public:
 
 private:
     void rejectIfTooLarge(std::size_t length) const;
+    void rejectIfSessionEnded(const std::string& sessionId) const;
     bool switchSessionIfNeeded(const std::string& sessionId);
+    void restartWith(const std::string& sessionId);
     void rejectIfClockWentBackwards(Nanoseconds captureTsNs) const;
     std::size_t offsetFor(std::size_t length);
     void discardFramesBeyondWritePointer();
@@ -119,6 +133,9 @@ private:
     std::uint64_t m_nextSequence{0};
     bool m_hasSession{false};
     std::string m_sessionId;
+    // Ultimas sessoes encerradas, mais recente no fim. Limitado porque ids de
+    // sessao (UUID) nao se repetem e so os recentes ainda tem quadro em transito.
+    std::deque<std::string> m_endedSessions;
     std::uint64_t m_ingestedTotal{0};
     std::uint64_t m_evictedTotal{0};
 };
