@@ -22,7 +22,9 @@ RingBufferRAMFacade::RingBufferRAMFacade(
     m_store(std::move(frameStore)),
     m_ringBuffer(std::make_unique<domain::RingBuffer>(m_config.capacity())),
     m_ingest(std::make_unique<application::IngestFrameUseCase>(*m_ringBuffer, *m_store)),
-    m_extract(std::make_unique<application::ExtractCaptureWindowUseCase>(*m_ringBuffer, *m_store)) {}
+    m_extract(std::make_unique<application::ExtractCaptureWindowUseCase>(*m_ringBuffer, *m_store)) {
+    rejectIfDepthInsufficient();
+}
 
 RingBufferRAMFacade::RingBufferRAMFacade(
     application::RingBufferConfig config,
@@ -38,6 +40,20 @@ RingBufferRAMFacade::RingBufferRAMFacade(
 
 RingBufferRAMFacade::~RingBufferRAMFacade() {
     stopCapture();
+}
+
+// Item 5: a janela precisa cobrir pre-rolagem + persistencia + latencia +
+// post_s + GOP. Checado no construtor, antes de qualquer quadro: subir com
+// menos gravaria clipes sem o comeco, e ninguem perceberia ate precisar da
+// evidencia. Se lancar, a arena ja criada e liberada pelo destrutor do membro.
+void RingBufferRAMFacade::rejectIfDepthInsufficient() const {
+    if (m_config.depthRequirement.has_value() &&
+        !m_config.depthRequirement->isSatisfiedBy(m_config.windowSeconds)) {
+        throw domain::InsufficientBufferDepthError(
+            "window of " + std::to_string(m_config.windowSeconds) +
+            " s is shorter than the required depth: " + m_config.depthRequirement->describe()
+        );
+    }
 }
 
 // -------------------------------------------------------------- ciclo de vida
@@ -75,16 +91,17 @@ void RingBufferRAMFacade::onFrame(const CapturedFrame& frame) {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         try {
-            const domain::Allocation allocation = m_ingest->execute(frame);
-            if (allocation.sessionRestarted) {
-                // Sessao nova: a ancora entre relogio de captura e relogio de
-                // parede precisa ser refeita, senao o replay traduziria tempos
-                // da sessao anterior.
-                m_clock.reset();
-                std::fprintf(stderr, "[S4.1] session switched to %s; buffer restarted\n",
-                             frame.sessionId.c_str());
+            if (frame.sessionId.empty()) {
+                // Fonte sem metadados de sessao (ex.: shmsrc de P4 sem o
+                // ods.p4.frame): o quadro pertence a sessao anunciada.
+                CapturedFrame inherited = frame;
+                inherited.sessionId = m_announcedSessionId.empty()
+                    ? m_config.cameraId + "-local"
+                    : m_announcedSessionId;
+                ingest(inherited);
+            } else {
+                ingest(frame);
             }
-            m_clock.anchorIfNeeded(frame.captureTsNs);
         } catch (const domain::DomainError& error) {
             // Quadro invalido nao derruba a captura: e contado e registrado,
             // porque B2 exige que nada seja descartado silenciosamente.
@@ -94,6 +111,66 @@ void RingBufferRAMFacade::onFrame(const CapturedFrame& frame) {
         }
     }
     m_frameArrived.notify_all();
+}
+
+// Chamado com m_mutex travado.
+void RingBufferRAMFacade::ingest(const CapturedFrame& frame) {
+    const domain::Allocation allocation = m_ingest->execute(frame);
+    if (allocation.sessionRestarted) {
+        // Sessao nova: a ancora entre relogio de captura e relogio de
+        // parede precisa ser refeita, senao o replay traduziria tempos
+        // da sessao anterior.
+        m_clock.reset();
+        ++m_sessionGeneration;
+        std::fprintf(stderr, "[S4.1] session switched to %s; buffer restarted\n",
+                     frame.sessionId.c_str());
+    }
+    m_clock.anchorIfNeeded(frame.captureTsNs, frame.timeBase);
+}
+
+// ------------------------------------------------------------ sessao oficial
+
+bool RingBufferRAMFacade::onSessionStarted(const domain::SessionStarted& marker) {
+    if (!marker.concerns(m_config.cameraId) || marker.sessionId.empty()) {
+        return false;
+    }
+    bool restarted = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_ringBuffer->hasEnded(marker.sessionId)) {
+            // Marcador reentregue fora de ordem: a sessao ja acabou.
+            return false;
+        }
+        m_announcedSessionId = marker.sessionId;
+        restarted = m_ringBuffer->startSession(marker.sessionId);
+        if (restarted) {
+            m_clock.reset();
+            ++m_sessionGeneration;
+            std::fprintf(stderr, "[S4.1] ods.session.started %s (%s); buffer restarted\n",
+                         marker.sessionId.c_str(), domain::to_string(marker.reason));
+        }
+    }
+    if (restarted) {
+        // Quem espera o pos-evento da sessao velha nao vai mais recebe-lo.
+        m_frameArrived.notify_all();
+    }
+    return restarted;
+}
+
+std::string RingBufferRAMFacade::inheritedSessionId() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_announcedSessionId.empty() ? m_config.cameraId + "-local" : m_announcedSessionId;
+}
+
+domain::Nanoseconds RingBufferRAMFacade::toCaptureTsNs(
+    std::chrono::system_clock::time_point wallClock
+) const {
+    if (!m_clock.isAnchored()) {
+        throw domain::BufferNotRunningError(
+            "capture clock is not anchored yet; no frame has been ingested"
+        );
+    }
+    return m_clock.toCaptureTsNs(wallClock);
 }
 
 // ------------------------------------------------------- contratos do S4.2
@@ -176,15 +253,56 @@ application::ExtractedSegment RingBufferRAMFacade::extractCaptureWindow(
     if (!m_isCapturing.load()) {
         throw domain::BufferNotRunningError("call startCapture() before extracting segments");
     }
+    // Recusa ANTES de esperar: um pedido que nunca vai ser atendido nao deve
+    // prender a thread do chamador ate o timeout.
+    rejectIfOutOfBuffer(window);
+    const std::uint64_t generation = m_sessionGeneration;
     const auto timeout = std::chrono::duration<double>(waitTimeoutSeconds);
-    m_frameArrived.wait_for(lock, timeout, [this, &window] {
-        return !m_isCapturing.load() || hasReached(window.endNs());
+    m_frameArrived.wait_for(lock, timeout, [this, &window, generation] {
+        return !m_isCapturing.load() || m_sessionGeneration != generation ||
+               hasReached(window.endNs());
     });
     // stopCapture() pode ter fechado a arena enquanto esperavamos o pos-evento.
     if (!m_isCapturing.load()) {
         throw domain::BufferNotRunningError("capture stopped while waiting for the post-event");
     }
+    if (m_sessionGeneration != generation) {
+        throw domain::OutOfBufferError(
+            "session changed to " + m_ringBuffer->sessionId() +
+            " while waiting for the post-event; the window was discarded with the old session"
+        );
+    }
     return m_extract->execute(window);
+}
+
+// Chamado com m_mutex travado. Buffer vazio nao tem "mais antigo" nem "mais
+// recente" para comparar: a decisao fica para a espera (que pode trazer os
+// primeiros quadros) e para o segmentFor().
+void RingBufferRAMFacade::rejectIfOutOfBuffer(const CaptureWindow& window) const {
+    if (m_ringBuffer->empty()) {
+        return;
+    }
+    const Nanoseconds oldest = m_ringBuffer->oldestCaptureTsNs();
+    const Nanoseconds newest = m_ringBuffer->newestCaptureTsNs();
+    if (window.endNs() < oldest) {
+        throw domain::WindowNotInBufferError(
+            "window ends at " + std::to_string(window.endNs()) +
+            " but the oldest frame in the buffer is " + std::to_string(oldest) +
+            "; it has already been evicted (buffer depth " +
+            std::to_string(m_config.windowSeconds) + " s)"
+        );
+    }
+    const auto maxPostNs = static_cast<Nanoseconds>(
+        m_config.maxPostSeconds * domain::kNanosecondsPerSecond);
+    if (window.endNs() - newest > maxPostNs) {
+        throw domain::PostWindowTooLongError(
+            "window ends " +
+            std::to_string(static_cast<double>(window.endNs() - newest) /
+                           domain::kNanosecondsPerSecond) +
+            " s after the newest frame; the maximum post_s is " +
+            std::to_string(m_config.maxPostSeconds) + " s"
+        );
+    }
 }
 
 bool RingBufferRAMFacade::hasReached(Nanoseconds targetTsNs) const {

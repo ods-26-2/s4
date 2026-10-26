@@ -50,9 +50,59 @@ public:
         : DomainError(message) {}
 };
 
-class WindowNotInBufferError : public DomainError {
+// 6c, ods.s4.capture.command: "janelas passadas limitadas a profundidade do
+// buffer" e "end_at no futuro e permitido ate post_s maximo configurado". As
+// duas violacoes respondem com o mesmo codigo do contrato, OUT_OF_BUFFER; as
+// subclasses dizem qual das duas aconteceu.
+class OutOfBufferError : public DomainError {
+public:
+    static constexpr const char* kCode = "OUT_OF_BUFFER";
+
+    explicit OutOfBufferError(const std::string& message = "Requested window is outside what the ring buffer can deliver")
+        : DomainError(message) {}
+};
+
+class WindowNotInBufferError : public OutOfBufferError {
 public:
     explicit WindowNotInBufferError(const std::string& message = "Requested window is no longer (or not yet) in the ring buffer")
+        : OutOfBufferError(message) {}
+};
+
+// O fim da janela esta mais longe do instante mais recente do buffer do que o
+// post_s maximo configurado: o pedido prenderia o chamador esperando o futuro.
+class PostWindowTooLongError : public OutOfBufferError {
+public:
+    explicit PostWindowTooLongError(const std::string& message = "Window ends further in the future than the configured maximum post_s")
+        : OutOfBufferError(message) {}
+};
+
+// Quadro atrasado de uma sessao ja encerrada por ods.session.started. Aceita-lo
+// reabriria a sessao velha e apagaria o buffer da nova.
+class StaleSessionFrameError : public DomainError {
+public:
+    explicit StaleSessionFrameError(const std::string& message = "Frame belongs to a session that has already ended")
+        : DomainError(message) {}
+};
+
+// A janela configurada nao cobre o que as regras da build exigem: um evento
+// chegaria com o comeco do clipe ja expulso do buffer.
+class InsufficientBufferDepthError : public DomainError {
+public:
+    explicit InsufficientBufferDepthError(const std::string& message = "Ring buffer window is shorter than the depth the rules require")
+        : DomainError(message) {}
+};
+
+class InvalidBufferDepthError : public DomainError {
+public:
+    explicit InvalidBufferDepthError(const std::string& message = "Buffer depth terms must not be negative")
+        : DomainError(message) {}
+};
+
+// Quadro cru do P4 que nao bate com o formato combinado (dimensoes, formato de
+// pixel, tamanho do buffer ou camera): codifica-lo produziria lixo no clipe.
+class InvalidRawFrameError : public DomainError {
+public:
+    explicit InvalidRawFrameError(const std::string& message = "Raw frame does not match the negotiated P4 format")
         : DomainError(message) {}
 };
 
@@ -116,6 +166,12 @@ public:
 class FrameSourceError : public ApplicationError {
 public:
     explicit FrameSourceError(const std::string& message = "Video frame source failed")
+        : ApplicationError(message) {}
+};
+
+class InvalidEncoderSettingsError : public ApplicationError {
+public:
+    explicit InvalidEncoderSettingsError(const std::string& message = "Invalid H.264 encoder settings")
         : ApplicationError(message) {}
 };
 

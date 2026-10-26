@@ -2,9 +2,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "s4/domain/value_objects/buffer_capacity.hpp"
+#include "s4/domain/value_objects/buffer_depth_requirement.hpp"
 
 namespace ods::s4::application {
 
@@ -15,8 +17,8 @@ namespace ods::s4::application {
 struct RingBufferConfig {
     // Identifica a camera e, por consequencia, o segmento de memoria.
     std::string cameraId{"cam0"};
-    // Quanto passado guardar. Deve ser >= o maior preSeconds que alguma
-    // aplicacao da build vai pedir, mais a duracao de um GOP.
+    // Quanto passado guardar. Deve cobrir depthRequirement (abaixo): pre-rolagem,
+    // persistencia da regra mais longa, latencia do evento, post_s e um GOP.
     double windowSeconds{30.0};
     // Bitrate configurado no encoder de P4; junto com a janela define a RAM.
     std::size_t bitrateBps{4000000};
@@ -30,6 +32,15 @@ struct RingBufferConfig {
     // Dimensoes anunciadas no VideoFrame entregue ao S4.2.
     std::uint32_t width{1920};
     std::uint32_t height{1080};
+    // 6c, ods.s4.capture.command: "end_at no futuro e permitido ate post_s
+    // maximo configurado". Uma janela que termina mais longe que isso do
+    // instante mais recente do buffer e recusada com OUT_OF_BUFFER, em vez de
+    // prender o chamador esperando. Mantido <= o teto de espera da API REST.
+    double maxPostSeconds{10.0};
+    // O que as regras da build exigem do buffer (item 5 do S4.1). Ausente = a
+    // build nao declarou as regras e a fachada nao tem como validar; presente,
+    // a fachada recusa subir com uma janela menor que a exigida.
+    std::optional<domain::BufferDepthRequirement> depthRequirement;
 
     [[nodiscard]] domain::BufferCapacity capacity() const {
         return domain::BufferCapacity::forEncodedStream(bitrateBps, windowSeconds, safetyFactor);

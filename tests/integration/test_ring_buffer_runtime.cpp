@@ -71,7 +71,12 @@ public:
     void stop() override { stopped = true; }
     [[nodiscard]] bool isRunning() const override { return started && !stopped; }
 
-    void emit(Nanoseconds captureTsNs, bool isKeyframe = true, const std::string& session = "live") {
+    void emit(
+        Nanoseconds captureTsNs,
+        bool isKeyframe = true,
+        const std::string& session = "live",
+        domain::CaptureTimeBase timeBase = domain::CaptureTimeBase::SourceClock
+    ) {
         static const std::vector<std::uint8_t> payload{0x42};
         domain::CapturedFrame frame;
         frame.captureTsNs = captureTsNs;
@@ -79,6 +84,7 @@ public:
         frame.length = payload.size();
         frame.isKeyframe = isKeyframe;
         frame.sessionId = session;
+        frame.timeBase = timeBase;
         m_onFrame(frame);
     }
 
@@ -270,11 +276,13 @@ void test_deve_liberar_extracao_pendente_quando_captura_for_parada() {
         facade->startCapture("ignored");
         raw->emit(0);
 
+        // post de 5 s: dentro do post_s maximo (10 s), entao o pedido espera de
+        // verdade, e so o stopCapture() pode solta-lo antes dos 10 s de timeout.
         bool stoppedWhileWaiting = false;
         const auto begin = std::chrono::steady_clock::now();
         std::thread waiter([&] {
             stoppedWhileWaiting = throws<domain::BufferNotRunningError>(
-                [&] { (void)facade->extractAround(0, 0.0, 60.0, 10.0); });
+                [&] { (void)facade->extractAround(0, 0.0, 5.0, 10.0); });
         });
         std::this_thread::sleep_for(std::chrono::milliseconds(round % 3));
         facade->stopCapture();
@@ -511,13 +519,282 @@ void test_deve_expor_pipelines_gstreamer_prontos_quando_consultados() {
     infrastructure::CsiCameraOptions camera;
     const std::string csi = infrastructure::GStreamerAppsinkFrameSource::jetsonCsiH264Pipeline(camera);
     ODS_CHECK(csi.find("nvarguscamerasrc") != std::string::npos);
-    ODS_CHECK(csi.find("insert-sps-pps=true") != std::string::npos);
+    // Orin Nano nao tem NVENC: o encoder e o x264enc, sem B-frames, com SPS/PPS
+    // repetidos em todo keyframe pelo h264parse.
+    ODS_CHECK(csi.find("nvv4l2h264enc") == std::string::npos);
+    ODS_CHECK(csi.find("nvvidconv ! video/x-raw,format=NV12") != std::string::npos);
+    ODS_CHECK(csi.find("x264enc") != std::string::npos);
+    ODS_CHECK(csi.find("bframes=0") != std::string::npos);
+    ODS_CHECK(csi.find("h264parse config-interval=-1") != std::string::npos);
     ODS_CHECK(csi.find("appsink name=ods_sink") != std::string::npos);
 
     const std::string shm = infrastructure::GStreamerAppsinkFrameSource::shmH264Pipeline("/dev/shm/p4");
     // O caminho vai entre aspas: sem isso um socket path com espaco (ou o
     // nome do arquivo mp4 no replay) truncaria o parse do pipeline.
     ODS_CHECK(shm.find("shmsrc socket-path=\"/dev/shm/p4\"") != std::string::npos);
+
+    // 6c: P4 entrega NV12 cru; o S4 codifica.
+    const std::string raw = infrastructure::GStreamerAppsinkFrameSource::p4RawShmPipeline(
+        "/tmp/p4 cam0", domain::RawVideoFormat(1920, 1080, 30.0));
+    ODS_CHECK(raw.find("shmsrc socket-path=\"/tmp/p4 cam0\"") != std::string::npos);
+    ODS_CHECK(raw.find("video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! x264enc") !=
+              std::string::npos);
+}
+
+// ======================================== 6c: sessao oficial (item 4 do S4.1)
+
+domain::SessionStarted session_marker(
+    const std::string& sessionId,
+    const std::string& cameraId,
+    domain::SessionChangeReason reason = domain::SessionChangeReason::Seek
+) {
+    domain::SessionStarted marker;
+    marker.sessionId = sessionId;
+    marker.mode = domain::SessionMode::Replay;
+    marker.sources = {cameraId};
+    marker.reason = reason;
+    return marker;
+}
+
+void test_deve_zerar_buffer_e_aceitar_relogio_voltando_quando_marcador_anunciar_seek() {
+    auto source = std::make_unique<ManualFrameSource>();
+    auto* raw = source.get();
+    const auto cfg = config(30.0);
+    auto facade = make_facade(cfg, std::move(source));
+    facade->startCapture("ignored");
+    for (int second = 100; second <= 110; ++second) {
+        raw->emit(second * S, true, "sessao-1");
+    }
+
+    ODS_CHECK(facade->onSessionStarted(session_marker("sessao-2", cfg.cameraId)));
+    ODS_CHECK(facade->stats().framesStored == 0u);
+    // SEEK: o captured_at voltou 97 s e nem por isso e "relogio retrocedendo".
+    raw->emit(3 * S, true, "sessao-2");
+
+    ODS_CHECK(facade->framesRejectedTotal() == 0u);
+    ODS_CHECK(facade->stats().sessionId == "sessao-2");
+    ODS_CHECK(facade->stats().framesStored == 1u);
+    facade->stopCapture();
+}
+
+void test_deve_recusar_quadro_atrasado_quando_sessao_ja_foi_encerrada_pelo_marcador() {
+    auto source = std::make_unique<ManualFrameSource>();
+    auto* raw = source.get();
+    const auto cfg = config(30.0);
+    auto facade = make_facade(cfg, std::move(source));
+    facade->startCapture("ignored");
+    raw->emit(100 * S, true, "sessao-1");
+    facade->onSessionStarted(session_marker("sessao-2", cfg.cameraId));
+    raw->emit(3 * S, true, "sessao-2");
+
+    // Quadro da sessao velha que ainda estava no pipeline quando o marcador chegou.
+    raw->emit(101 * S, false, "sessao-1");
+
+    ODS_CHECK(facade->framesRejectedTotal() == 1u);
+    ODS_CHECK(facade->stats().sessionId == "sessao-2");
+    ODS_CHECK(facade->stats().framesStored == 1u);
+    facade->stopCapture();
+}
+
+void test_nao_deve_zerar_buffer_quando_marcador_chegar_depois_dos_quadros_da_mesma_sessao() {
+    auto source = std::make_unique<ManualFrameSource>();
+    auto* raw = source.get();
+    const auto cfg = config(30.0);
+    auto facade = make_facade(cfg, std::move(source));
+    facade->startCapture("ignored");
+    raw->emit(1 * S, true, "sessao-1");
+    raw->emit(2 * S, false, "sessao-1");
+
+    ODS_CHECK(!facade->onSessionStarted(session_marker("sessao-1", cfg.cameraId,
+                                                       domain::SessionChangeReason::Start)));
+    ODS_CHECK(facade->stats().framesStored == 2u);
+    facade->stopCapture();
+}
+
+void test_deve_ignorar_marcador_quando_sessao_for_de_outra_camera() {
+    auto source = std::make_unique<ManualFrameSource>();
+    auto* raw = source.get();
+    auto facade = make_facade(config(30.0), std::move(source));
+    facade->startCapture("ignored");
+    raw->emit(1 * S, true, "sessao-1");
+
+    ODS_CHECK(!facade->onSessionStarted(session_marker("sessao-2", "cam-de-outra-build")));
+    ODS_CHECK(facade->stats().framesStored == 1u);
+    facade->stopCapture();
+}
+
+void test_deve_herdar_sessao_anunciada_quando_fonte_nao_trouxer_session_id() {
+    auto source = std::make_unique<ManualFrameSource>();
+    auto* raw = source.get();
+    const auto cfg = config(30.0);
+    auto facade = make_facade(cfg, std::move(source));
+    facade->startCapture("ignored");
+
+    raw->emit(1 * S, true, "");
+    ODS_CHECK(facade->stats().sessionId == cfg.cameraId + "-local");
+
+    facade->onSessionStarted(session_marker("sessao-oficial", cfg.cameraId,
+                                            domain::SessionChangeReason::Start));
+    raw->emit(2 * S, true, "");
+
+    ODS_CHECK(facade->inheritedSessionId() == "sessao-oficial");
+    ODS_CHECK(facade->stats().sessionId == "sessao-oficial");
+    ODS_CHECK(facade->framesRejectedTotal() == 0u);
+    facade->stopCapture();
+}
+
+// ===================================== 6c: relogio oficial (item 3 do S4.1)
+
+void test_deve_traduzir_relogio_como_identidade_quando_quadro_trouxer_captured_at_utc() {
+    auto source = std::make_unique<ManualFrameSource>();
+    auto* raw = source.get();
+    auto facade = make_facade(config(30.0), std::move(source));
+    facade->startCapture("ignored");
+    // 2026-09-23T14:29:52Z, o started_at do exemplo da 6c.
+    constexpr Nanoseconds kStartedAt = 1790173792LL * S;
+    raw->emit(kStartedAt, true, "sessao-p4", domain::CaptureTimeBase::CapturedAtUtc);
+    raw->emit(kStartedAt + S, false, "sessao-p4", domain::CaptureTimeBase::CapturedAtUtc);
+
+    const std::chrono::system_clock::time_point startedAt{
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(
+            std::chrono::nanoseconds(kStartedAt))};
+
+    ODS_CHECK(facade->timeBase() == domain::CaptureTimeBase::CapturedAtUtc);
+    ODS_CHECK(facade->toWallClock(kStartedAt + S) == startedAt + std::chrono::seconds(1));
+    ODS_CHECK(facade->toCaptureTsNs(startedAt) == kStartedAt);
+    facade->stopCapture();
+}
+
+void test_deve_manter_traducao_oficial_quando_marcador_zerar_o_buffer_antes_do_proximo_quadro() {
+    auto source = std::make_unique<ManualFrameSource>();
+    auto* raw = source.get();
+    const auto cfg = config(30.0);
+    auto facade = make_facade(cfg, std::move(source));
+    facade->startCapture("ignored");
+    constexpr Nanoseconds kCapturedAt = 1790173792LL * S;
+    raw->emit(kCapturedAt, true, "sessao-1", domain::CaptureTimeBase::CapturedAtUtc);
+
+    // SEEK anunciado, nenhum quadro da sessao nova ainda: um clipe extraido
+    // antes do marcador precisa continuar conseguindo montar o descritor.
+    facade->onSessionStarted(session_marker("sessao-2", cfg.cameraId));
+    const auto wall = facade->toWallClock(kCapturedAt);
+
+    ODS_CHECK(std::chrono::duration_cast<std::chrono::nanoseconds>(wall.time_since_epoch()).count() ==
+              kCapturedAt);
+    facade->stopCapture();
+}
+
+void test_deve_ancorar_no_relogio_de_parede_quando_fonte_nao_tiver_captured_at() {
+    auto source = std::make_unique<ManualFrameSource>();
+    auto* raw = source.get();
+    auto facade = make_facade(config(30.0), std::move(source));
+    facade->startCapture("ignored");
+    const auto before = std::chrono::system_clock::now();
+    raw->emit(5 * S);
+    const auto after = std::chrono::system_clock::now();
+
+    ODS_CHECK(facade->timeBase() == domain::CaptureTimeBase::SourceClock);
+    ODS_CHECK(facade->toWallClock(5 * S) >= before && facade->toWallClock(5 * S) <= after);
+    facade->stopCapture();
+}
+
+// ============================================ 6c: OUT_OF_BUFFER (item 6)
+
+void test_deve_lancar_out_of_buffer_sem_esperar_quando_janela_ja_tiver_sido_expulsa() {
+    auto source = std::make_unique<ManualFrameSource>();
+    auto* raw = source.get();
+    auto facade = make_facade(config(30.0), std::move(source));
+    facade->startCapture("ignored");
+    for (int second = 100; second <= 120; ++second) {
+        raw->emit(second * S);
+    }
+
+    const auto begin = std::chrono::steady_clock::now();
+    const bool threw = throws<domain::WindowNotInBufferError>(
+        [&] { (void)facade->extractAround(10 * S, 1.0, 1.0, 5.0); });
+    const auto elapsed = std::chrono::steady_clock::now() - begin;
+
+    ODS_CHECK(threw);
+    ODS_CHECK(elapsed < std::chrono::seconds(1));
+    facade->stopCapture();
+}
+
+void test_deve_lancar_out_of_buffer_quando_fim_da_janela_passar_do_post_maximo() {
+    auto source = std::make_unique<ManualFrameSource>();
+    auto* raw = source.get();
+    auto cfg = config(30.0);
+    cfg.maxPostSeconds = 10.0;
+    auto facade = make_facade(cfg, std::move(source));
+    facade->startCapture("ignored");
+    for (int second = 0; second <= 10; ++second) {
+        raw->emit(second * S);
+    }
+
+    const auto begin = std::chrono::steady_clock::now();
+    const bool threw = throws<domain::PostWindowTooLongError>(
+        [&] { (void)facade->extractAround(10 * S, 1.0, 11.0, 5.0); });
+
+    ODS_CHECK(threw);
+    ODS_CHECK(std::chrono::steady_clock::now() - begin < std::chrono::seconds(1));
+    facade->stopCapture();
+}
+
+void test_deve_entregar_trecho_truncado_quando_janela_so_comecar_antes_do_quadro_mais_antigo() {
+    auto source = std::make_unique<ManualFrameSource>();
+    auto* raw = source.get();
+    auto facade = make_facade(config(30.0), std::move(source));
+    facade->startCapture("ignored");
+    for (int second = 100; second <= 110; ++second) {
+        raw->emit(second * S);
+    }
+
+    // O "antes" ja saiu, mas o evento ainda esta no buffer: entrega com aviso.
+    const auto segment = facade->extractAround(102 * S, 5.0, 1.0);
+
+    ODS_CHECK(segment.isTruncatedAtStart);
+    ODS_CHECK(segment.firstCaptureTsNs() == 100 * S);
+    facade->stopCapture();
+}
+
+void test_deve_lancar_out_of_buffer_quando_sessao_mudar_durante_a_espera_do_pos_evento() {
+    auto source = std::make_unique<ManualFrameSource>();
+    auto* raw = source.get();
+    const auto cfg = config(30.0);
+    auto facade = make_facade(cfg, std::move(source));
+    facade->startCapture("ignored");
+    for (int second = 0; second <= 10; ++second) {
+        raw->emit(second * S, true, "sessao-1");
+    }
+
+    bool threwOutOfBuffer = false;
+    const auto begin = std::chrono::steady_clock::now();
+    std::thread waiter([&] {
+        threwOutOfBuffer = throws<domain::OutOfBufferError>(
+            [&] { (void)facade->extractAround(10 * S, 2.0, 3.0, 5.0); });
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    facade->onSessionStarted(session_marker("sessao-2", cfg.cameraId,
+                                            domain::SessionChangeReason::Loop));
+    waiter.join();
+
+    ODS_CHECK(threwOutOfBuffer);
+    ODS_CHECK(std::chrono::steady_clock::now() - begin < std::chrono::seconds(2));
+    facade->stopCapture();
+}
+
+// ======================================== profundidade exigida (item 5)
+
+void test_deve_recusar_subir_quando_janela_nao_cobrir_a_profundidade_exigida() {
+    auto cfg = config(30.0);
+    // Regra de permanencia de 60 s: 5 + 60 + 2 + 10 + 1 = 78 s.
+    cfg.depthRequirement = domain::BufferDepthRequirement(5.0, 60.0, 2.0, 10.0, 1.0);
+
+    ODS_CHECK(throws<domain::InsufficientBufferDepthError>(
+        [&] { (void)make_facade(cfg, std::make_unique<ManualFrameSource>()); }));
+
+    cfg.windowSeconds = 78.0;
+    auto facade = make_facade(cfg, std::make_unique<ManualFrameSource>());
+    ODS_CHECK(facade->config().windowSeconds == 78.0);
 }
 
 int main() {
@@ -550,6 +827,21 @@ int main() {
     test_deve_devolver_lista_vazia_quando_ler_janela_apos_parar_a_captura();
     test_deve_parar_sem_falha_quando_leituras_concorrerem_com_o_desligamento();
     test_deve_expor_pipelines_gstreamer_prontos_quando_consultados();
+
+    // 6c: sessao oficial, relogio oficial, OUT_OF_BUFFER e profundidade.
+    test_deve_zerar_buffer_e_aceitar_relogio_voltando_quando_marcador_anunciar_seek();
+    test_deve_recusar_quadro_atrasado_quando_sessao_ja_foi_encerrada_pelo_marcador();
+    test_nao_deve_zerar_buffer_quando_marcador_chegar_depois_dos_quadros_da_mesma_sessao();
+    test_deve_ignorar_marcador_quando_sessao_for_de_outra_camera();
+    test_deve_herdar_sessao_anunciada_quando_fonte_nao_trouxer_session_id();
+    test_deve_traduzir_relogio_como_identidade_quando_quadro_trouxer_captured_at_utc();
+    test_deve_manter_traducao_oficial_quando_marcador_zerar_o_buffer_antes_do_proximo_quadro();
+    test_deve_ancorar_no_relogio_de_parede_quando_fonte_nao_tiver_captured_at();
+    test_deve_lancar_out_of_buffer_sem_esperar_quando_janela_ja_tiver_sido_expulsa();
+    test_deve_lancar_out_of_buffer_quando_fim_da_janela_passar_do_post_maximo();
+    test_deve_entregar_trecho_truncado_quando_janela_so_comecar_antes_do_quadro_mais_antigo();
+    test_deve_lancar_out_of_buffer_quando_sessao_mudar_durante_a_espera_do_pos_evento();
+    test_deve_recusar_subir_quando_janela_nao_cobrir_a_profundidade_exigida();
 
     std::cout << "test_s4_ring_buffer_runtime: all tests passed\n";
     return 0;

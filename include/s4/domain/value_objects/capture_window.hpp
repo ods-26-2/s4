@@ -6,7 +6,10 @@
 
 namespace ods::s4::domain {
 
-// Nanossegundos no relogio de CAPTURA de P4 (nao no relogio de parede).
+// Nanossegundos no relogio de CAPTURA (nao no relogio de parede do S4). Com
+// os metadados de P4 (ods.p4.frame) e o proprio captured_at em ns desde a
+// epoca Unix (UTC); com fontes sem metadados, o relogio da fonte (ver
+// CaptureTimeBase em frame_source.hpp).
 using Nanoseconds = std::int64_t;
 
 constexpr Nanoseconds kNanosecondsPerSecond = 1000000000LL;

@@ -9,20 +9,25 @@
 #include "s4/infrastructure/retention/purge_daemon.hpp"
 #include "s4/infrastructure/retention/statvfs_disk_usage_provider.hpp"
 #include "s4/infrastructure/retention/system_clock.hpp"
+#include "s4/infrastructure/ringbuffer/fake_p4_producer.hpp"
 #include "s4/infrastructure/ringbuffer/synthetic_frame_source.hpp"
+#include "s4/infrastructure/gstreamer/software_h264_encoder.hpp"
 #include "s4/presentation/http/clip_descriptor_http_server.hpp"
 
 #if ODS_S4_WITH_GSTREAMER
 #include "s4/infrastructure/gstreamer/appsink_frame_source.hpp"
 #include "s4/infrastructure/gstreamer/gstreamer_mp4_muxer.hpp"
+#include "s4/infrastructure/gstreamer/p4_raw_frame_encoder_source.hpp"
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <csignal>
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -38,8 +43,12 @@ void on_signal(int) {
 void print_usage(const char* program) {
     std::cerr << "usage: " << program
               << " [--port PORT] [--db PATH] [--media-dir PATH]\n"
-                 "       [--source FILE] [--scenario] [--camera ID]\n"
+                 "       [--source FILE | --p4-fake | --p4-shm SOCKET] [--scenario] [--camera ID]\n"
+                 "       [--width W] [--height H] [--fps F]\n"
+                 "       [--encoder-preset NAME] [--encoder-bitrate BPS] [--gop N] [--encoder-threads N]\n"
                  "       [--window-seconds N] [--bitrate BPS]\n"
+                 "       [--pre-roll-seconds N] [--max-rule-persistence-seconds N]\n"
+                 "       [--event-latency-seconds N] [--max-post-seconds N]\n"
                  "       [--retention-days DAYS] [--quota-trigger RATIO] [--quota-target RATIO]\n"
                  "       [--sweep-interval SECONDS] [--disk-check-interval SECONDS] [--purge-log PATH]\n"
                  "\n"
@@ -49,10 +58,26 @@ void print_usage(const char* program) {
                  "  --scenario        extrai um clipe de demonstracao na subida e\n"
                  "                    imprime o descriptor. Sem este flag o daemon so\n"
                  "                    serve a API.\n"
+                 "  --p4-fake         S4.1/6c: P4 falso em processo (NV12 cru + ods.p4.frame),\n"
+                 "                    codificado pelo x264enc; captured_at e sessao oficiais\n"
+                 "  --p4-shm SOCKET   S4.1/6c: NV12 cru de P4 via shmsink, codificado pelo\n"
+                 "                    x264enc; sem metadados, a sessao vem do marcador\n"
+                 "  --width/--height/--fps  formato combinado com P4 (padrao: 1280x720@30)\n"
+                 "  --encoder-preset NAME  ultrafast|superfast|veryfast|faster|fast (padrao: ultrafast)\n"
+                 "  --encoder-bitrate BPS  bitrate do x264enc; dimensiona o buffer nos\n"
+                 "                    modos --p4-* (padrao: 4000000)\n"
+                 "  --gop N           quadros entre keyframes (padrao: 30)\n"
+                 "  --encoder-threads N  threads do x264 (padrao: 0 = automatico)\n"
                  "  --camera ID        id da camera (padrao: cam0)\n"
-                 "  --window-seconds N  segundos de ring buffer (padrao: 30)\n"
+                 "  --window-seconds N  segundos de ring buffer (padrao: o maior entre 30\n"
+                 "                    e a profundidade exigida; explicito e menor: erro)\n"
                  "  --bitrate BPS     bitrate nominal usado para dimensionar o\n"
-                 "                    ring buffer (padrao: 134400)\n"
+                 "                    ring buffer em --source/sintetica (padrao: 134400)\n"
+                 "  --pre-roll-seconds N  pre-rolagem dos clipes (padrao: 5)\n"
+                 "  --max-rule-persistence-seconds N  maior min_duration + debounce entre\n"
+                 "                    as regras da build (padrao: 8)\n"
+                 "  --event-latency-seconds N  folga de entrega do evento S2 -> S4 (padrao: 2)\n"
+                 "  --max-post-seconds N  post_s maximo de um pedido (padrao: 10)\n"
                  "\n"
                  "  --retention-days N   dias que a midia fica guardada (padrao: 7, LGPD)\n"
                  "  --quota-trigger R     ocupacao do NVMe que dispara o expurgo (padrao: 0.85)\n"
@@ -60,6 +85,43 @@ void print_usage(const char* program) {
                  "  --sweep-interval N      segundos entre varreduras de prazo (padrao: 3600)\n"
                  "  --disk-check-interval N  segundos entre consultas de statvfs (padrao: 30)\n"
                  "  --purge-log PATH        log JSONL do expurgo (padrao: ao lado do banco)\n";
+}
+
+// S4.1 — de onde vem o video.
+enum class CaptureInput { Synthetic, FileReplay, P4Fake, P4Shm };
+
+struct CaptureOptions {
+    CaptureInput input{CaptureInput::Synthetic};
+    std::string sourcePath;
+    std::string p4ShmSocket;
+    std::uint32_t width{1280};
+    std::uint32_t height{720};
+    double fps{30.0};
+    ods::s4::infrastructure::SoftwareH264EncoderSettings encoder;
+};
+
+// S4.1 item 5 — o que as regras da build exigem do buffer. Padroes do exemplo
+// da 6c (luva): 5 s de pre-rolagem, evento ~8 s depois do inicio da condicao.
+struct DepthOptions {
+    double preRollSeconds{5.0};
+    double longestRulePersistenceSeconds{8.0};
+    double eventLatencySeconds{2.0};
+    double maxPostSeconds{10.0};
+    std::optional<double> explicitWindowSeconds;
+};
+
+constexpr double kDefaultWindowSeconds = 30.0;
+
+// Janela explicita menor que a exigida e erro (a fachada recusa); sem janela
+// explicita, cresce ate a exigida para nao cortar o comeco de nenhum clipe.
+double resolve_window_seconds(
+    const DepthOptions& depth,
+    const ods::s4::domain::BufferDepthRequirement& requirement
+) {
+    if (depth.explicitWindowSeconds.has_value()) {
+        return *depth.explicitWindowSeconds;
+    }
+    return std::max(kDefaultWindowSeconds, requirement.requiredSeconds());
 }
 
 // S4.3 — parametros do expurgo. Os padroes sao os do guia: 7 dias (LGPD) e
@@ -186,7 +248,8 @@ void run_demo_scenario(
     const std::shared_ptr<ods::s4::infrastructure::RingBufferRAMFacade>& mediaBuffer,
     const std::string& mediaDir,
     int port,
-    bool sourceIsFinite
+    bool sourceIsFinite,
+    bool sourceIsSynthetic
 ) {
     using ods::s4::domain::kNanosecondsPerSecond;
 
@@ -240,7 +303,7 @@ void run_demo_scenario(
         std::cout.flush();
     } catch (const std::exception& error) {
         std::cerr << "clip extraction failed: " << error.what() << '\n';
-        if (!sourceIsFinite) {
+        if (sourceIsSynthetic) {
             // A fonte sintetica alimenta o ring buffer com bytes que NAO sao
             // H.264 codificado: existe para exercitar janela, eviccao e
             // alinhamento a keyframe, nao para virar container. O muxer
@@ -249,7 +312,7 @@ void run_demo_scenario(
             // melhor que devolver um .mp4 invalido e chamar de evidencia.
             std::cerr << "a fonte sintetica nao produz H.264 real, entao nao ha "
                          "container a extrair aqui; para o clipe de video de "
-                         "verdade, rode com --source <arquivo.mp4>\n";
+                         "verdade, rode com --source <arquivo.mp4> ou --p4-fake\n";
         }
     }
 }
@@ -262,9 +325,9 @@ int main(int argc, char* argv[]) {
     std::string dbPath = "/tmp/s4_media_evidence.db";
     std::string mediaDir = "/tmp/s4_media_evidence";
     // S4.1/S4.4 — captura e replay.
-    std::string sourcePath;
+    CaptureOptions capture;
+    DepthOptions depth;
     std::string cameraId = "cam0";
-    double windowSeconds = 30.0;
     long long bitrateBps = 134400;
     bool runScenario = false;
     // S4.3 — expurgo.
@@ -287,11 +350,39 @@ int main(int argc, char* argv[]) {
             } else if (read_value("--media-dir")) {
                 mediaDir = argv[i];
             } else if (read_value("--source")) {
-                sourcePath = argv[i];
+                capture.input = CaptureInput::FileReplay;
+                capture.sourcePath = argv[i];
+            } else if (argument == "--p4-fake") {
+                capture.input = CaptureInput::P4Fake;
+            } else if (read_value("--p4-shm")) {
+                capture.input = CaptureInput::P4Shm;
+                capture.p4ShmSocket = argv[i];
+            } else if (read_value("--width")) {
+                capture.width = static_cast<std::uint32_t>(std::stoul(argv[i]));
+            } else if (read_value("--height")) {
+                capture.height = static_cast<std::uint32_t>(std::stoul(argv[i]));
+            } else if (read_value("--fps")) {
+                capture.fps = std::stod(argv[i]);
+            } else if (read_value("--encoder-preset")) {
+                capture.encoder.speedPreset = ods::s4::infrastructure::parse_x264_speed_preset(argv[i]);
+            } else if (read_value("--encoder-bitrate")) {
+                capture.encoder.bitrateBps = static_cast<std::size_t>(std::stoull(argv[i]));
+            } else if (read_value("--gop")) {
+                capture.encoder.keyframeInterval = std::stoi(argv[i]);
+            } else if (read_value("--encoder-threads")) {
+                capture.encoder.threads = std::stoi(argv[i]);
             } else if (read_value("--camera")) {
                 cameraId = argv[i];
             } else if (read_value("--window-seconds")) {
-                windowSeconds = std::stod(argv[i]);
+                depth.explicitWindowSeconds = std::stod(argv[i]);
+            } else if (read_value("--pre-roll-seconds")) {
+                depth.preRollSeconds = std::stod(argv[i]);
+            } else if (read_value("--max-rule-persistence-seconds")) {
+                depth.longestRulePersistenceSeconds = std::stod(argv[i]);
+            } else if (read_value("--event-latency-seconds")) {
+                depth.eventLatencySeconds = std::stod(argv[i]);
+            } else if (read_value("--max-post-seconds")) {
+                depth.maxPostSeconds = std::stod(argv[i]);
             } else if (read_value("--bitrate")) {
                 bitrateBps = std::stoll(argv[i]);
             } else if (argument == "--scenario") {
@@ -317,6 +408,10 @@ int main(int argc, char* argv[]) {
         // std::stoi/stod com texto nao numerico ou fora da faixa.
         print_usage(argv[0]);
         return 1;
+    } catch (const ods::s4::domain::ODSBaseException& error) {
+        // --encoder-preset com nome desconhecido.
+        std::cerr << error.what() << '\n';
+        return 1;
     }
     if (retentionOptions.sweepIntervalSeconds <= 0 || retentionOptions.diskCheckIntervalSeconds <= 0) {
         std::cerr << "--sweep-interval and --disk-check-interval must be positive\n";
@@ -328,10 +423,30 @@ int main(int argc, char* argv[]) {
             (std::filesystem::path(dbPath).parent_path() / "s4_purge_log.jsonl").string();
     }
 
-    if (!sourcePath.empty() && !std::filesystem::is_regular_file(sourcePath)) {
-        std::cerr << "--source is not a readable file: '" << sourcePath << "'\n";
+    if (capture.input == CaptureInput::FileReplay &&
+        !std::filesystem::is_regular_file(capture.sourcePath)) {
+        std::cerr << "--source is not a readable file: '" << capture.sourcePath << "'\n";
         return 1;
     }
+    const bool encodesInS4 =
+        capture.input == CaptureInput::P4Fake || capture.input == CaptureInput::P4Shm;
+    std::optional<ods::s4::domain::RawVideoFormat> rawFormat;
+    std::optional<ods::s4::domain::BufferDepthRequirement> depthRequirement;
+    try {
+        if (encodesInS4) {
+            capture.encoder.validate();
+            rawFormat.emplace(capture.width, capture.height, capture.fps);
+        }
+        // GOP em segundos: o do encoder quando o S4 codifica; 1 s nos demais
+        // modos (a fonte sintetica do demo e o MP4 de teste tem keyframe/s).
+        const double gopSeconds = encodesInS4 ? capture.encoder.gopSeconds(capture.fps) : 1.0;
+        depthRequirement.emplace(depth.preRollSeconds, depth.longestRulePersistenceSeconds,
+                                 depth.eventLatencySeconds, depth.maxPostSeconds, gopSeconds);
+    } catch (const ods::s4::domain::ODSBaseException& error) {
+        std::cerr << "invalid capture settings: " << error.what() << '\n';
+        return 1;
+    }
+    const double windowSeconds = resolve_window_seconds(depth, *depthRequirement);
 
     std::error_code errorCode;
     std::filesystem::create_directories(mediaDir, errorCode);
@@ -350,9 +465,14 @@ int main(int argc, char* argv[]) {
     ods::s4::application::RingBufferConfig bufferConfig;
     bufferConfig.cameraId = cameraId;
     bufferConfig.windowSeconds = windowSeconds;
-    bufferConfig.bitrateBps = bitrateBps;
-    bufferConfig.width = 320;
-    bufferConfig.height = 240;
+    // Quando o S4 codifica, a arena e dimensionada pelo bitrate do PROPRIO
+    // encoder; nos demais modos, pelo --bitrate nominal da fonte.
+    bufferConfig.bitrateBps = encodesInS4 ? capture.encoder.bitrateBps
+                                          : static_cast<std::size_t>(bitrateBps);
+    bufferConfig.width = encodesInS4 ? capture.width : 320;
+    bufferConfig.height = encodesInS4 ? capture.height : 240;
+    bufferConfig.maxPostSeconds = depth.maxPostSeconds;
+    bufferConfig.depthRequirement = depthRequirement;
     // Daemon: apos uma queda, o /dev/shm da execucao anterior pode ter ficado
     // para tras e impediria a subida. Uma instancia por camera, entao limpar e
     // o comportamento correto aqui.
@@ -360,8 +480,31 @@ int main(int argc, char* argv[]) {
 
     std::unique_ptr<ods::s4::domain::IFrameSource> frameSource;
     std::string sessionId;
+#if ODS_S4_WITH_GSTREAMER
+    // Ponteiro de quem entrega quadros de P4; a fachada e dona da fonte.
+    ods::s4::infrastructure::P4RawFrameEncoderSource* p4Source = nullptr;
+#endif
 
-    if (sourcePath.empty()) {
+    if (encodesInS4) {
+#if ODS_S4_WITH_GSTREAMER
+        if (capture.input == CaptureInput::P4Fake) {
+            auto source = std::make_unique<ods::s4::infrastructure::P4RawFrameEncoderSource>(
+                cameraId, *rawFormat, capture.encoder);
+            p4Source = source.get();
+            frameSource = std::move(source);
+        } else {
+            // Sessao vazia: o shm nao carrega ods.p4.frame; os quadros herdam
+            // a sessao do marcador ods.session.started.
+            frameSource = std::make_unique<ods::s4::infrastructure::GStreamerAppsinkFrameSource>(
+                ods::s4::infrastructure::GStreamerAppsinkFrameSource::p4RawShmPipeline(
+                    capture.p4ShmSocket, *rawFormat, capture.encoder),
+                "");
+        }
+#else
+        std::cerr << "--p4-fake/--p4-shm require GStreamer; rebuild with -DODS_S4_WITH_GSTREAMER=ON\n";
+        return 1;
+#endif
+    } else if (capture.input == CaptureInput::Synthetic) {
         ods::s4::infrastructure::SyntheticSourceOptions sourceOptions;
         sourceOptions.fps = 15.0;
         sourceOptions.gop = 15;
@@ -378,10 +521,10 @@ int main(int argc, char* argv[]) {
         // gravacao". O id deriva do proprio arquivo, entao dois daemons do
         // mesmo video nao se confundem.
         sessionId = "replay-" +
-            std::filesystem::path(sourcePath).filename().string();
+            std::filesystem::path(capture.sourcePath).filename().string();
         frameSource = std::make_unique<ods::s4::infrastructure::GStreamerAppsinkFrameSource>(
             ods::s4::infrastructure::GStreamerAppsinkFrameSource::fileReplayH264Pipeline(
-                sourcePath
+                capture.sourcePath
             ),
             sessionId
         );
@@ -397,6 +540,8 @@ int main(int argc, char* argv[]) {
             std::move(bufferConfig), std::move(frameSource)
         );
     } catch (const ods::s4::domain::ODSBaseException& error) {
+        // Inclui InsufficientBufferDepthError: --window-seconds explicito menor
+        // que pre-rolagem + persistencia + latencia + post_s + GOP.
         std::cerr << "cannot start the S4.1 ring buffer: " << error.what() << std::endl;
         return 1;
     }
@@ -429,6 +574,27 @@ int main(int argc, char* argv[]) {
     mediaBuffer->startCapture(sessionId);
     purgeDaemon->start();
 
+    // P4 falso em processo: anuncia a sessao (ods.session.started) e entrega
+    // quadros crus com ods.p4.frame no ritmo da camera.
+    std::unique_ptr<ods::s4::infrastructure::FakeP4Feed> fakeP4;
+#if ODS_S4_WITH_GSTREAMER
+    if (p4Source != nullptr) {
+        ods::s4::infrastructure::FakeP4Options fakeOptions;
+        fakeOptions.sourceId = cameraId;
+        fakeOptions.format = *rawFormat;
+        fakeP4 = std::make_unique<ods::s4::infrastructure::FakeP4Feed>(
+            fakeOptions,
+            [p4Source](const ods::s4::domain::P4FrameMetadata& metadata,
+                       const std::uint8_t* data, std::size_t length) {
+                p4Source->submit(metadata, data, length);
+            },
+            [mediaBuffer](const ods::s4::domain::SessionStarted& marker) {
+                mediaBuffer->onSessionStarted(marker);
+            });
+        fakeP4->start();
+    }
+#endif
+
     ods::s4::presentation::ClipDescriptorHttpServer server(repository, extractClip, mediaDir);
     if (!server.bind(port)) {
         std::cerr << "cannot bind to port " << port << '\n';
@@ -450,17 +616,35 @@ int main(int argc, char* argv[]) {
     std::cout << "Purge daemon: retention " << retentionOptions.retentionDays << " d, quota "
               << retentionOptions.quotaTrigger * 100 << "% -> " << retentionOptions.quotaTarget * 100
               << "%, log " << retentionOptions.purgeLogPath << '\n';
-    if (!sourcePath.empty()) {
-        std::cout << "Replaying '" << sourcePath << "' into the ring buffer\n";
-    } else {
-        std::cout << "Recording synthetic feed\n";
+    const auto& activeBufferConfig = mediaBuffer->config();
+    std::cout << "Ring buffer: " << activeBufferConfig.windowSeconds << " s ("
+              << depthRequirement->describe() << " required), "
+              << activeBufferConfig.capacity().megabytes() << " MB, max post "
+              << activeBufferConfig.maxPostSeconds << " s\n";
+    switch (capture.input) {
+        case CaptureInput::FileReplay:
+            std::cout << "Replaying '" << capture.sourcePath << "' into the ring buffer\n";
+            break;
+        case CaptureInput::P4Fake:
+            std::cout << "Encoding fake P4 frames (" << capture.width << "x" << capture.height
+                      << "@" << capture.fps << ", " << capture.encoder.gstElement() << ")\n";
+            break;
+        case CaptureInput::P4Shm:
+            std::cout << "Encoding raw P4 frames from shm '" << capture.p4ShmSocket << "' ("
+                      << capture.encoder.gstElement() << ")\n";
+            break;
+        case CaptureInput::Synthetic:
+            std::cout << "Recording synthetic feed\n";
+            break;
     }
     std::cout.flush();
 
     if (runScenario) {
         // So o replay de arquivo tem fim; a fonte sintetica e a camera seguem
         // ingerindo para sempre, e exigir que pare deixaria o demo sem clipe.
-        run_demo_scenario(extractClip, mediaBuffer, mediaDir, port, !sourcePath.empty());
+        run_demo_scenario(extractClip, mediaBuffer, mediaDir, port,
+                          capture.input == CaptureInput::FileReplay,
+                          capture.input == CaptureInput::Synthetic);
     }
 
     std::cout << "Idle until SIGINT...\n";
@@ -470,6 +654,9 @@ int main(int argc, char* argv[]) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    if (fakeP4) {
+        fakeP4->stop();
+    }
     purgeDaemon->stop();
     mediaBuffer->stopCapture();
     server.stop();
