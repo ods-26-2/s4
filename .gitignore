@@ -17,3 +17,6 @@ out/
 # Runtime data
 *.db
 *.db-journal
+# Local build/test artifacts
+build-wsl/
+docker-data/

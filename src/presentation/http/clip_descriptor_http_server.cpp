@@ -6,7 +6,11 @@
 
 #include "httplib.h"
 
+#ifdef _WIN32
+#include <rpc.h>
+#else
 #include <uuid/uuid.h>
+#endif
 
 #include <atomic>
 #include <cctype>
@@ -62,11 +66,21 @@ std::string format_double(double value) {
 }
 
 std::string generate_event_id() {
+#ifdef _WIN32
+    UUID uuid;
+    UuidCreate(&uuid);
+    RPC_CSTR str;
+    UuidToStringA(&uuid, &str);
+    std::string s(reinterpret_cast<char*>(str));
+    RpcStringFreeA(&str);
+    return std::string("event-") + s;
+#else
     uuid_t uuid;
     char buffer[37];
     uuid_generate_random(uuid);
     uuid_unparse_lower(uuid, buffer);
     return std::string("event-") + buffer;
+#endif
 }
 
 bool is_valid_event_id(const std::string& id) {

@@ -1,3 +1,10 @@
+
+#include "s4/infrastructure/b3_bus/kafka_event_transport.hpp"
+#include "s4/infrastructure/b3_bus/message_router.hpp"
+#include "s4/infrastructure/b3_bus/handlers/session_started_handler.hpp"
+#include "s4/infrastructure/b3_bus/handlers/s2_event_handler.hpp"
+#include "s4/infrastructure/b3_bus/handlers/capture_command_handler.hpp"
+#include "s4/infrastructure/b3_bus/handlers/clip_query_handler.hpp"
 #include "s4/application/use_cases/extract_clip.hpp"
 #include "s4/application/use_cases/purge_media.hpp"
 #include "s4/domain/strategies/disk_quota_fifo_strategy.hpp"
@@ -330,6 +337,10 @@ int main(int argc, char* argv[]) {
     std::string cameraId = "cam0";
     long long bitrateBps = 134400;
     bool runScenario = false;
+    std::string kafkaBrokers = "34.66.235.91:9093";
+    std::string kafkaGroupId = "s4-media-evidence";
+    std::string kafkaClientId = "s4";
+    bool kafkaEnabled = true;
     // S4.3 — expurgo.
     RetentionOptions retentionOptions;
 
@@ -385,6 +396,14 @@ int main(int argc, char* argv[]) {
                 depth.maxPostSeconds = std::stod(argv[i]);
             } else if (read_value("--bitrate")) {
                 bitrateBps = std::stoll(argv[i]);
+            } else if (read_value("--kafka-brokers")) {
+                kafkaBrokers = argv[i];
+            } else if (read_value("--kafka-group-id")) {
+                kafkaGroupId = argv[i];
+            } else if (read_value("--kafka-client-id")) {
+                kafkaClientId = argv[i];
+            } else if (argument == "--kafka-disabled") {
+                kafkaEnabled = false;
             } else if (argument == "--scenario") {
                 runScenario = true;
             } else if (read_value("--retention-days")) {
@@ -596,6 +615,33 @@ int main(int argc, char* argv[]) {
 #endif
 
     ods::s4::presentation::ClipDescriptorHttpServer server(repository, extractClip, mediaDir);
+    // Kafka/B3 event bus integration
+    std::shared_ptr<ods::s4::infrastructure::IEventTransport> kafkaTransport;
+    std::shared_ptr<ods::s4::infrastructure::MessageRouter> messageRouter;
+    if (kafkaEnabled) {
+#ifdef ODS_S4_WITH_KAFKA
+        ods::s4::infrastructure::KafkaEventTransportConfig kcfg;
+        kcfg.brokers = kafkaBrokers;
+        kcfg.groupId = kafkaGroupId;
+        kcfg.clientId = kafkaClientId;
+        kafkaTransport = std::make_shared<ods::s4::infrastructure::KafkaEventTransport>(kcfg);
+#else
+        std::cerr << "Kafka requested but not compiled (ODS_S4_WITH_KAFKA disabled)\n";
+#endif
+        if (kafkaTransport) {
+            messageRouter = std::make_shared<ods::s4::infrastructure::MessageRouter>(kafkaTransport);
+            messageRouter->register_handler("ods.session.started",
+                ods::s4::infrastructure::SessionStartedHandler(mediaBuffer));
+            messageRouter->register_handler("ods.s2.event",
+                ods::s4::infrastructure::S2EventHandler(extractClip, repository, kafkaTransport, cameraId, mediaDir));
+            messageRouter->register_handler("ods.s4.capture.command",
+                ods::s4::infrastructure::CaptureCommandHandler(extractClip, repository, kafkaTransport, cameraId, mediaDir));
+            messageRouter->register_handler("ods.s4.clip.query",
+                ods::s4::infrastructure::ClipQueryHandler(repository, kafkaTransport));
+            messageRouter->start();
+            std::cout << "Kafka/B3 bus enabled: " << kafkaBrokers << " (group " << kafkaGroupId << ")\n";
+        }
+    }
     if (!server.bind(port)) {
         std::cerr << "cannot bind to port " << port << '\n';
         return 1;
@@ -654,6 +700,12 @@ int main(int argc, char* argv[]) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    if (messageRouter) {
+        messageRouter->stop();
+    }
+    if (kafkaTransport) {
+        kafkaTransport->stop();
+    }
     if (fakeP4) {
         fakeP4->stop();
     }
@@ -662,3 +714,7 @@ int main(int argc, char* argv[]) {
     server.stop();
     return 0;
 }
+
+
+
+

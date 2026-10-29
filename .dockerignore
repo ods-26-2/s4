@@ -13,3 +13,6 @@ CMakeCache.txt
 
 # Docs (não são necessários na imagem)
 docs/
+# Local build/test artifacts
+build-wsl/
+docker-data/

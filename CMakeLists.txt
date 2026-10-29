@@ -199,3 +199,25 @@ set_tests_properties(test_s4_p4_input PROPERTIES SKIP_RETURN_CODE 77)
 
 # OUT_OF_BUFFER tipado no POST /api/v1/events (caminho por relogio de captura).
 s4_add_test(test_s4_out_of_buffer_http tests/integration/test_out_of_buffer_http.cpp)
+# Kafka/B3 pub-sub support
+option(ODS_S4_WITH_KAFKA "Enable Kafka/B3 event bus integration" ON)
+option(ODS_S4_REQUIRE_KAFKA "Fail if Kafka not found when enabled" OFF)
+
+set(ODS_S4_KAFKA_ENABLED OFF)
+if(ODS_S4_WITH_KAFKA)
+    pkg_check_modules(RDKAFKA QUIET rdkafka++ IMPORTED_TARGET)
+    if(RDKAFKA_FOUND)
+        set(ODS_S4_KAFKA_ENABLED ON)
+        message(STATUS "Kafka/librdkafka enabled for B3 event bus")
+        target_compile_definitions(s4_media_evidence_lib PUBLIC ODS_S4_WITH_KAFKA)
+        target_link_libraries(s4_media_evidence_lib PUBLIC PkgConfig::RDKAFKA)
+    else()
+        if(ODS_S4_REQUIRE_KAFKA)
+            message(FATAL_ERROR "ODS_S4_WITH_KAFKA=ON but librdkafka not found via pkg-config")
+        else()
+            message(WARNING "librdkafka not found; Kafka integration disabled")
+        endif()
+    endif()
+endif()
+# Ensure nlohmann/json include is available
+include_directories(third_party)

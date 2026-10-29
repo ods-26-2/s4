@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsqlite3-dev \
         libssl-dev \
         uuid-dev \
+        librdkafka-dev \
         gstreamer1.0-dev \
         libgstreamer-plugins-base1.0-dev \
         gstreamer1.0-plugins-base \
@@ -71,6 +72,7 @@ COPY video_test ./video_test
 # ausencia do material reprova. Numa imagem que tem o video,(video ausente) e
 # uma falha de build, nao uma opcao.
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DODS_S4_REQUIRE_SAMPLE_VIDEO=ON \
+        -DODS_S4_WITH_KAFKA=ON -DODS_S4_REQUIRE_KAFKA=ON \
  && cmake --build build -j"$(nproc)" \
  && ctest --test-dir build --output-on-failure
 
@@ -90,6 +92,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsqlite3-0 \
         libssl3 \
         libuuid1 \
+        librdkafka1 \
+        librdkafka++1 \
         libstdc++6 \
         curl \
         gstreamer1.0 \
@@ -117,7 +121,8 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 VOLUME ["/data"]
 
-CMD ["/app/s4_media_evidence", "--port", "8080", "--db", "/data/s4.db", "--media-dir", "/data/media"]
+CMD ["/app/s4_media_evidence", "--port", "8080", "--db", "/data/s4.db", "--media-dir", "/data/media", \
+     "--kafka-brokers", "34.66.235.91:9093", "--kafka-group-id", "s4-media-evidence", "--kafka-client-id", "s4"]
 
 # ---------- Estágio 3: smoke (validação, não vai para a imagem final) ----
 # Existe para provar que a imagem de runtime realmente faz o que o Dockerfile

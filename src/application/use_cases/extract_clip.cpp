@@ -2,7 +2,11 @@
 
 #include "s4/infrastructure/hashing/sha256_hasher.hpp"
 
+#ifdef _WIN32
+#include <rpc.h>
+#else
 #include <uuid/uuid.h>
+#endif
 
 #include <cstdint>
 #include <utility>
@@ -13,11 +17,21 @@ namespace ods::s4::application {
 namespace {
 
 std::string generate_clip_id() {
+#ifdef _WIN32
+    UUID uuid;
+    UuidCreate(&uuid);
+    RPC_CSTR str;
+    UuidToStringA(&uuid, &str);
+    std::string s(reinterpret_cast<char*>(str));
+    RpcStringFreeA(&str);
+    return std::string("clip-") + s;
+#else
     uuid_t uuid;
     char buffer[37];
     uuid_generate_random(uuid);
     uuid_unparse_lower(uuid, buffer);
     return std::string("clip-") + buffer;
+#endif
 }
 
 } // namespace

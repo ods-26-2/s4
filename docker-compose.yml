@@ -9,6 +9,20 @@ services:
       target: runtime
     image: ods/s4-media-evidence:0.1.0
     container_name: s4-media-evidence
+    command:
+      - /app/s4_media_evidence
+      - --port
+      - "8080"
+      - --db
+      - /data/s4.db
+      - --media-dir
+      - /data/media
+      - --kafka-brokers
+      - ${ODS_S4_KAFKA_BROKERS:-34.66.235.91:9093}
+      - --kafka-group-id
+      - ${ODS_S4_KAFKA_GROUP_ID:-s4-media-evidence}
+      - --kafka-client-id
+      - s4
     ports:
       - "8080:8080"
     volumes:
