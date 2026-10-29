@@ -1,0 +1,29 @@
+services:
+  s4-media-evidence:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Alvo explicito: a imagem de producao. Sem isto o compose usaria o
+      # ultimo estágio do Dockerfile, e o smoke (com jq e ferramentas de
+      # verificacao dentro) viraria a imagem do servico.
+      target: runtime
+    image: ods/s4-media-evidence:0.1.0
+    container_name: s4-media-evidence
+    ports:
+      - "8080:8080"
+    volumes:
+      - s4_media:/data
+    # O ring buffer do S4.1 vive em /dev/shm. O padrão do Docker é 64 MB, que
+    # não cobre janelas maiores nem múltiplas câmeras: 30 s a 4 Mbps já custam
+    # ~22 MB por câmera (ver docs/S4.1-ring-buffer.md).
+    shm_size: "256m"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  s4_media:
