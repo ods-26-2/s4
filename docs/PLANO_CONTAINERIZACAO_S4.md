@@ -74,13 +74,31 @@ docker compose up --build -d
 
 O `ctest` roda dentro do `builder` a cada build → falha de teste quebra a imagem.
 
-## 7. Build para a Jetson (ARM64)
+## 7. Build e execução na Jetson (ARM64)
+
+Decisão da Sprint 3: **sem nuvem**. O S4 roda na borda, com mídia no NVMe local
+e Kafka fornecido pela equipe de integração. O plano completo está em
+[`PLANO_SPRINT3_JETSON.md`](PLANO_SPRINT3_JETSON.md).
 
 - Rodar **neste** repositório na Jetson: `docker build -t ods/s4-media-evidence:0.1.0 .` (nativo arm64, sem emulação).
 - Alternativa em x86_64 (CI): `docker buildx build --platform linux/arm64,linux/amd64 -t ods/s4-media-evidence:0.1.0 .`
   com `binfmt`/QEMU configurado.
-- O código-alvo não usa GPU/NVENC ainda (mock), portanto a imagem arm64 roda igual; quando S4.1 real
-  (GStreamer/`/dev/shm`) entrar, o runtime precisará do `gstreamer1.0-*` e privilégios de memória compartilhada.
+- O runtime usa `x264enc` por software (a Orin Nano não tem NVENC) e `/dev/shm`
+  para o ring buffer (`shm_size: "256m"` no compose).
+- Subida com volume NVMe e broker padrão/configurável:
+
+  ```bash
+  cp .env.example .env   # preencher ODS_S4_DATA_DIR e ODS_S4_KAFKA_BROKERS
+  docker compose up -d --build
+  curl http://<IP_DA_JETSON>:8080/healthz
+  ```
+
+- Com `--kafka-disabled`, o S4 sobe sem barramento e atende somente a API HTTP;
+  isso é intencional para a demonstração funcionar mesmo se o Kafka não responder.
+  Sem a flag, o broker padrão do guia é usado e pode ser sobrescrito por
+  `ODS_S4_KAFKA_BROKERS`.
+- O volume `/data` é bind mount em `ODS_S4_DATA_DIR` (NVMe real), pois o
+  `statvfs` do S4.3 precisa medir o volume onde as mídias ficam.
 
 ## 8. Riscos e observações
 

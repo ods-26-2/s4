@@ -1,4 +1,5 @@
 #include "s4/infrastructure/b3_bus/handlers/s2_event_handler.hpp"
+#include "s4/application/dtos/iso_time_utils.hpp"
 #include "s4/domain/value_objects/capture_window.hpp"
 #include "s4/domain/errors/domain_error.hpp"
 #include <nlohmann/json.hpp>
@@ -80,8 +81,17 @@ void S2EventHandler::operator()(const std::string& topic, const B3Envelope& enve
         std::filesystem::create_directories(m_mediaDir);
         std::string out = (std::filesystem::path(m_mediaDir) / (clipId + ".mp4")).string();
         try {
-            auto clip = m_extractClip->executeCaptureWindow(eventId.empty() ? clipId : eventId, window, out, 20.0);
+            auto clip = m_extractClip->executeCaptureWindow(
+                eventId.empty() ? clipId : eventId, window, out, 20.0, clipId);
             std::cerr << "S2 event clip written: " << out << std::endl;
+            std::string sessionId;
+            if (envelope.sessionId) {
+                sessionId = *envelope.sessionId;
+            } else if (p.contains("session_id") && p["session_id"].is_string()) {
+                sessionId = p["session_id"].get<std::string>();
+            } else {
+                sessionId = cb->bufferStats().sessionId;
+            }
             B3Envelope outEnv;
             outEnv.messageType = "event";
             outEnv.messageId = generate_message_id();
@@ -89,8 +99,13 @@ void S2EventHandler::operator()(const std::string& topic, const B3Envelope& enve
             outEnv.schemaVersion = "1.0";
             outEnv.producer = "S4";
             outEnv.publishedAt = now_iso8601_utc();
-            if (envelope.sessionId) outEnv.sessionId = envelope.sessionId;
+            outEnv.sessionId = normalize_uuid(sessionId);
             if (envelope.sourceId) outEnv.sourceId = envelope.sourceId; else outEnv.sourceId = m_sourceId;
+            // Captura automatica: o correlation_id referencia o event_id.
+            outEnv.correlationId = eventId.empty() ? envelope.messageId : eventId;
+            outEnv.capturedAt = envelope.capturedAt.value_or(
+                application::to_iso8601(clip.timeWindow().startTime()));
+            outEnv.sequence = next_sequence(outEnv.producer, *outEnv.sessionId);
             nlohmann::json payload;
             payload["clip_id"] = clip.clipId();
             payload["event_id"] = eventId.empty() ? nullptr : nlohmann::json(eventId);
@@ -98,8 +113,8 @@ void S2EventHandler::operator()(const std::string& topic, const B3Envelope& enve
             payload["media_uri"] =
                 "s4://clips/" +
                 std::filesystem::path(clip.filePath()).filename().string();
-            payload["start_at"] = now_iso8601_utc();
-            payload["end_at"] = now_iso8601_utc();
+            payload["start_at"] = application::to_iso8601(clip.timeWindow().startTime());
+            payload["end_at"] = application::to_iso8601(clip.timeWindow().endTime());
             payload["points_of_interest"] = nlohmann::json::array();
             payload["hash_sha256"] = clip.sha256Hash();
             payload["expires_at"] = now_iso8601_utc();

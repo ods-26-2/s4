@@ -91,7 +91,18 @@ void print_usage(const char* program) {
                  "  --quota-target R      ocupacao a que o expurgo volta (padrao: 0.80)\n"
                  "  --sweep-interval N      segundos entre varreduras de prazo (padrao: 3600)\n"
                  "  --disk-check-interval N  segundos entre consultas de statvfs (padrao: 30)\n"
-                 "  --purge-log PATH        log JSONL do expurgo (padrao: ao lado do banco)\n";
+                 "  --purge-log PATH        log JSONL do expurgo (padrao: ao lado do banco)\n"
+                 "\n"
+                 "  --kafka-brokers HOSTS   broker(s) do barramento B3, fornecidos pela\n"
+                 "                    equipe de integracao; tambem ODS_S4_KAFKA_BROKERS\n"
+                 "                    (sem broker o S4 sobe e atende apenas a API HTTP)\n"
+                 "  --kafka-group-id ID     group.id do consumidor S4 (env ODS_S4_KAFKA_GROUP_ID)\n"
+                 "  --kafka-client-id ID    client.id do S4 (env ODS_S4_KAFKA_CLIENT_ID)\n"
+                 "  --kafka-disabled        nao conecta ao barramento mesmo com broker definido\n"
+                 "  Seguranca (opcional, repassada ao librdkafka):\n"
+                 "    ODS_S4_KAFKA_SECURITY_PROTOCOL, ODS_S4_KAFKA_SASL_MECHANISM,\n"
+                 "    ODS_S4_KAFKA_SASL_USERNAME, ODS_S4_KAFKA_SASL_PASSWORD,\n"
+                 "    ODS_S4_KAFKA_SSL_CA_LOCATION\n";
 }
 
 // S4.1 — de onde vem o video.
@@ -305,7 +316,7 @@ void run_demo_scenario(
         std::cout << "clip_id: " << clip.clipId() << '\n';
         std::cout << "file:    " << clip.filePath() << '\n';
         std::cout << "sha256:  " << clip.sha256Hash() << '\n';
-        std::cout << "GET http://127.0.0.1:" << port << "/api/v1/clips/"
+        std::cout << "GET http://<ip-da-jetson>:" << port << "/api/v1/clips/"
                   << clip.clipId() << "\n";
         std::cout.flush();
     } catch (const std::exception& error) {
@@ -337,10 +348,10 @@ int main(int argc, char* argv[]) {
     std::string cameraId = "cam0";
     long long bitrateBps = 134400;
     bool runScenario = false;
-    std::string kafkaBrokers = "34.66.235.91:9093";
-    std::string kafkaGroupId = "s4-media-evidence";
-    std::string kafkaClientId = "s4";
-    bool kafkaEnabled = true;
+    // O broker vem do ambiente/flag. A equipe de integracao opera o barramento;
+    // este repositorio nao embute endereco de nuvem nem de localhost.
+    auto kafkaConfig = ods::s4::infrastructure::kafka_config_from_env();
+    bool kafkaDisabled = false;
     // S4.3 — expurgo.
     RetentionOptions retentionOptions;
 
@@ -397,13 +408,13 @@ int main(int argc, char* argv[]) {
             } else if (read_value("--bitrate")) {
                 bitrateBps = std::stoll(argv[i]);
             } else if (read_value("--kafka-brokers")) {
-                kafkaBrokers = argv[i];
+                kafkaConfig.brokers = argv[i];
             } else if (read_value("--kafka-group-id")) {
-                kafkaGroupId = argv[i];
+                kafkaConfig.groupId = argv[i];
             } else if (read_value("--kafka-client-id")) {
-                kafkaClientId = argv[i];
+                kafkaConfig.clientId = argv[i];
             } else if (argument == "--kafka-disabled") {
-                kafkaEnabled = false;
+                kafkaDisabled = true;
             } else if (argument == "--scenario") {
                 runScenario = true;
             } else if (read_value("--retention-days")) {
@@ -432,6 +443,7 @@ int main(int argc, char* argv[]) {
         std::cerr << error.what() << '\n';
         return 1;
     }
+    const bool kafkaEnabled = !kafkaDisabled && kafkaConfig.enabled();
     if (retentionOptions.sweepIntervalSeconds <= 0 || retentionOptions.diskCheckIntervalSeconds <= 0) {
         std::cerr << "--sweep-interval and --disk-check-interval must be positive\n";
         return 1;
@@ -620,11 +632,7 @@ int main(int argc, char* argv[]) {
     std::shared_ptr<ods::s4::infrastructure::MessageRouter> messageRouter;
     if (kafkaEnabled) {
 #ifdef ODS_S4_WITH_KAFKA
-        ods::s4::infrastructure::KafkaEventTransportConfig kcfg;
-        kcfg.brokers = kafkaBrokers;
-        kcfg.groupId = kafkaGroupId;
-        kcfg.clientId = kafkaClientId;
-        kafkaTransport = std::make_shared<ods::s4::infrastructure::KafkaEventTransport>(kcfg);
+        kafkaTransport = std::make_shared<ods::s4::infrastructure::KafkaEventTransport>(kafkaConfig);
 #else
         std::cerr << "Kafka requested but not compiled (ODS_S4_WITH_KAFKA disabled)\n";
 #endif
@@ -639,8 +647,12 @@ int main(int argc, char* argv[]) {
             messageRouter->register_handler("ods.s4.clip.query",
                 ods::s4::infrastructure::ClipQueryHandler(repository, kafkaTransport));
             messageRouter->start();
-            std::cout << "Kafka/B3 bus enabled: " << kafkaBrokers << " (group " << kafkaGroupId << ")\n";
+            std::cout << "Kafka/B3 bus enabled: " << kafkaConfig.brokers
+                      << " (group " << kafkaConfig.groupId << ")\n";
         }
+    } else {
+        std::cout << "Kafka/B3 bus disabled by --kafka-disabled (default broker: "
+                  << kafkaConfig.brokers << ")\n";
     }
     if (!server.bind(port)) {
         std::cerr << "cannot bind to port " << port << '\n';
@@ -655,9 +667,9 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
-    std::cout << "S4 Media Evidence listening on http://127.0.0.1:" << port
-              << "/api/v1/clips/{id}\n";
-    std::cout << "Simulate an event: POST http://127.0.0.1:" << port
+    std::cout << "S4 Media Evidence listening on http://0.0.0.0:" << port
+              << "/api/v1/clips/{id} (acesse pelo IP da Jetson)\n";
+    std::cout << "Simulate an event: POST http://<ip-da-jetson>:" << port
               << "/api/v1/events\n";
     std::cout << "Purge daemon: retention " << retentionOptions.retentionDays << " d, quota "
               << retentionOptions.quotaTrigger * 100 << "% -> " << retentionOptions.quotaTarget * 100

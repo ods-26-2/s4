@@ -10,14 +10,9 @@
 #include <atomic>
 #include <mutex>
 #include "s4/infrastructure/b3_bus/event_transport.hpp"
+#include "s4/infrastructure/b3_bus/kafka_config.hpp"
 
 namespace ods::s4::infrastructure {
-
-struct KafkaEventTransportConfig {
-    std::string brokers = "34.66.235.91:9093";
-    std::string groupId = "s4-media-evidence";
-    std::string clientId = "s4";
-};
 
 class KafkaEventTransport : public IEventTransport {
 public:

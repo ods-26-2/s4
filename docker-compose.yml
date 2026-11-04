@@ -17,16 +17,25 @@ services:
       - /data/s4.db
       - --media-dir
       - /data/media
-      - --kafka-brokers
-      - ${ODS_S4_KAFKA_BROKERS:-34.66.235.91:9093}
-      - --kafka-group-id
-      - ${ODS_S4_KAFKA_GROUP_ID:-s4-media-evidence}
-      - --kafka-client-id
-      - s4
+    environment:
+      # Broker padrao historico do guia; a equipe de integracao sobrescreve
+      # via .env. Para subir sem barramento, use --kafka-disabled no command.
+      ODS_S4_KAFKA_BROKERS: ${ODS_S4_KAFKA_BROKERS:-34.66.235.91:9093}
+      ODS_S4_KAFKA_GROUP_ID: ${ODS_S4_KAFKA_GROUP_ID:-s4-media-evidence}
+      ODS_S4_KAFKA_CLIENT_ID: ${ODS_S4_KAFKA_CLIENT_ID:-s4}
+      ODS_S4_KAFKA_SECURITY_PROTOCOL: ${ODS_S4_KAFKA_SECURITY_PROTOCOL:-}
+      ODS_S4_KAFKA_SASL_MECHANISM: ${ODS_S4_KAFKA_SASL_MECHANISM:-}
+      ODS_S4_KAFKA_SASL_USERNAME: ${ODS_S4_KAFKA_SASL_USERNAME:-}
+      ODS_S4_KAFKA_SASL_PASSWORD: ${ODS_S4_KAFKA_SASL_PASSWORD:-}
+      ODS_S4_KAFKA_SSL_CA_LOCATION: ${ODS_S4_KAFKA_SSL_CA_LOCATION:-}
     ports:
+      # 0.0.0.0 para a demonstracao ser acessada pelo IP da Jetson, nunca
+      # apenas por localhost.
       - "8080:8080"
     volumes:
-      - s4_media:/data
+      # Bind mount no NVMe real: o statvfs precisa medir o volume onde os
+      # clipes ficam (a cota de 85% do S4.3 nao funciona sobre volume Docker).
+      - ${ODS_S4_DATA_DIR:-./data}:/data
     # O ring buffer do S4.1 vive em /dev/shm. O padrão do Docker é 64 MB, que
     # não cobre janelas maiores nem múltiplas câmeras: 30 s a 4 Mbps já custam
     # ~22 MB por câmera (ver docs/S4.1-ring-buffer.md).
@@ -38,6 +47,3 @@ services:
       timeout: 3s
       start_period: 5s
       retries: 3
-
-volumes:
-  s4_media:

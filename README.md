@@ -71,6 +71,7 @@ mod2/s4-media-evidence/
 
 | Documento | Para quê |
 | :--- | :--- |
+| [`docs/PLANO_SPRINT3_JETSON.md`](docs/PLANO_SPRINT3_JETSON.md) | **Plano da Sprint 3**: execução na Jetson, NVMe local e Kafka externo (sem nuvem). |
 | [`docs/S4.4-demo-replay-e2e.md`](docs/S4.4-demo-replay-e2e.md) | **Guia de demonstração**: mostrar o fluxo do MP4 real ao artefato indexado, passo a passo. |
 | [`docs/S4.1-ring-buffer.md`](docs/S4.1-ring-buffer.md) | Detalhes do ring buffer: arena, evicção, ponte de relógios. |
 
@@ -214,6 +215,10 @@ Resumo; o detalhamento está em [`docs/S4.3-retencao-expurgo.md`](docs/S4.3-rete
 - **Bibliotecas do Sistema**:
   - `sqlite3` (persistência de metadados)
   - `OpenSSL` (cálculo de hash SHA-256)
+  - `librdkafka` (opcional; integração com o barramento B3). O broker padrão é
+    o endereço histórico do guia (`34.66.235.91:9093`); endereço e credenciais
+    podem ser sobrescritos pela equipe de integração via `ODS_S4_KAFKA_*`. Com
+    `--kafka-disabled` o serviço sobe sem barramento e atende apenas a API HTTP.
   - `GStreamer 1.0` (replay de vídeo, demux, parse H.264 e mux para MP4).
     Em Debian/Ubuntu os pacotes necessários são `gstreamer1.0-dev`,
     `libgstreamer-plugins-base1.0-dev` (é ele que traz o `gstreamer-app-1.0.pc`),
@@ -335,6 +340,30 @@ curl -s http://127.0.0.1:8080/api/v1/buffer/stats | jq
 | `POST /api/v1/events` | Dispara um evento e extrai o clipe; responde `201` com o DTO. |
 | `GET /api/v1/clips/{id}` | Descritor do clipe, incluindo o SHA-256. |
 
+### Barramento B3 (Kafka)
+
+O S4 consome `ods.s2.event`, `ods.session.started`, `ods.s4.capture.command` e
+`ods.s4.clip.query`, e publica `ods.s4.clip`/replies. O broker padrão é o
+endereço histórico do guia (`34.66.235.91:9093`), sobrescrito pela equipe de
+integração quando necessário:
+
+```bash
+ODS_S4_KAFKA_BROKERS=broker:9092 ODS_S4_KAFKA_GROUP_ID=s4-media-evidence \
+  ./build/s4_media_evidence --port 8080 --db /tmp/s4.db --media-dir /tmp/s4-media
+```
+
+Também é possível usar `--kafka-brokers`, `--kafka-group-id` e
+`--kafka-client-id` (têm precedência sobre o ambiente). As variáveis opcionais
+`ODS_S4_KAFKA_SECURITY_PROTOCOL`, `ODS_S4_KAFKA_SASL_*` e
+`ODS_S4_KAFKA_SSL_CA_LOCATION` são repassadas ao librdkafka sem serem logadas.
+
+Com `--kafka-disabled`, o S4 sobe sem barramento e atende apenas a API HTTP —
+o software continua demonstrável mesmo se o Kafka não estiver disponível.
+
+> **Demonstração na Jetson:** acesse pelo IP da placa (ex.:
+> `http://<IP_DA_JETSON>:8080/...`), nunca por `localhost`. O serviço escuta em
+> `0.0.0.0`.
+
 > **Nota de build:** o modo `Release` define `NDEBUG` e remove todos os `assert()`. Os testes do S4.1 usam
 > `ODS_CHECK` ([`tests/ods_check.hpp`](tests/ods_check.hpp)), que vale em qualquer modo de build.
 
@@ -351,6 +380,12 @@ ele listava como backlog já foi implementado — S4.1 em
 Imagem OCI **multi-arch** (`debian:bookworm-slim`, multi-stage): o estágio `builder` compila em C++20 e executa o
 `ctest` completo (falha de teste quebra o build), e o estágio `runtime` final contém apenas as bibliotecas em tempo de
 execução e o binário, rodando como usuário não-root `s4` com `VOLUME /data`.
+
+Na Sprint 3 o alvo é a **Jetson (ARM64)**, sem nuvem. O `docker-compose.yml`
+monta `/data` no NVMe real (`ODS_S4_DATA_DIR`) e usa o broker Kafka padrão do
+guia, sobrescrito por `ODS_S4_KAFKA_*`; veja `.env.example` e o
+[`docs/PLANO_SPRINT3_JETSON.md`](docs/PLANO_SPRINT3_JETSON.md). Com
+`--kafka-disabled`, o serviço sobe e atende apenas a API HTTP.
 # Guia de Desenvolvimento e Execução - Kit B6 (Módulo MOD-2)
 
 Este repositório contém a implementação dos submódulos de interface **B6.1 (OverlayPlayer)** e **B6.2 (ZoneEditor)**, responsáveis pela renderização gráfica acelerada e edição topológica vetorial do ecossistema ODS.
@@ -413,12 +448,15 @@ Para correr os testes de **ambos os módulos simultaneamente**, execute:
 # Build (testes rodam dentro do builder)
 docker build -t ods/s4-media-evidence:0.1.0 ./mod2/s4-media-evidence
 
-# Executar (dados persistidos em volume nomeado)
-docker run -d --rm --name s4 -p 8080:8080 -v s4_data:/data ods/s4-media-evidence:0.1.0
-curl http://127.0.0.1:8080/healthz                # {"status": "ok"}
+# Executar (dados persistidos no NVMe/bind mount e Kafka opcional)
+docker run -d --rm --name s4 -p 8080:8080 \
+  -v /mnt/nvme/s4:/data \
+  -e ODS_S4_KAFKA_BROKERS="${ODS_S4_KAFKA_BROKERS:-}" \
+  ods/s4-media-evidence:0.1.0
+curl http://<IP_DA_JETSON>:8080/healthz           # {"status": "ok"}
 
-# Ou via docker compose (healthcheck + porta + volume)
-docker compose -f mod2/s4-media-evidence/docker-compose.yml up -d --build
+# Ou via docker compose (healthcheck + porta + bind mount NVMe)
+docker compose up -d --build
 ```
 
 Há ainda um estágio `smoke`, que **não** faz parte da imagem final: ele roda

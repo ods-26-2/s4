@@ -1,4 +1,5 @@
 #include "s4/infrastructure/b3_bus/handlers/capture_command_handler.hpp"
+#include "s4/application/dtos/iso_time_utils.hpp"
 #include "s4/domain/value_objects/capture_window.hpp"
 #include "s4/domain/errors/domain_error.hpp"
 #include <nlohmann/json.hpp>
@@ -52,6 +53,12 @@ void CaptureCommandHandler::operator()(const std::string& topic, const B3Envelop
         std::string eventId;
         if (p.contains("event_id") && !p["event_id"].is_null()) eventId = p["event_id"].get<std::string>();
         std::string clipId = gen_clip_id();
+        std::string sessionId;
+        if (envelope.sessionId) {
+            sessionId = *envelope.sessionId;
+        } else if (p.contains("session_id") && p["session_id"].is_string()) {
+            sessionId = p["session_id"].get<std::string>();
+        }
 
         // Reply immediately
         if (m_transport) {
@@ -62,6 +69,7 @@ void CaptureCommandHandler::operator()(const std::string& topic, const B3Envelop
             reply.schemaVersion = "1.0";
             reply.producer = "S4";
             reply.publishedAt = now_iso8601_utc();
+            if (!sessionId.empty()) reply.sessionId = normalize_uuid(sessionId);
             if (envelope.messageId.size()) reply.correlationId = envelope.messageId;
             nlohmann::json rp;
             rp["status"] = "OK";
@@ -73,6 +81,9 @@ void CaptureCommandHandler::operator()(const std::string& topic, const B3Envelop
         if (!m_extractClip || !m_extractClip->supportsCaptureWindows()) return;
         auto cb = m_extractClip->captureBuffer();
         if (!cb) return;
+        if (sessionId.empty()) {
+            sessionId = cb->bufferStats().sessionId;
+        }
         std::filesystem::create_directories(m_mediaDir);
         std::string out = (std::filesystem::path(m_mediaDir) / (clipId + ".mp4")).string();
 
@@ -82,7 +93,8 @@ void CaptureCommandHandler::operator()(const std::string& topic, const B3Envelop
             if (!(mediaType == "SNAPSHOT")) {
                 window = domain::CaptureWindow::around(ts, 5.0, 5.0);
             }
-            auto clip = m_extractClip->executeCaptureWindow(eventId.empty() ? clipId : eventId, window, out, 10.0);
+            auto clip = m_extractClip->executeCaptureWindow(
+                eventId.empty() ? clipId : eventId, window, out, 10.0, clipId);
             B3Envelope outEnv;
             outEnv.messageType = "event";
             outEnv.messageId = generate_message_id();
@@ -91,13 +103,21 @@ void CaptureCommandHandler::operator()(const std::string& topic, const B3Envelop
             outEnv.producer = "S4";
             outEnv.publishedAt = now_iso8601_utc();
             outEnv.sourceId = sourceId;
+            outEnv.sessionId = normalize_uuid(sessionId);
+            // Captura manual: o correlation_id referencia o message_id do comando.
+            if (!envelope.messageId.empty()) outEnv.correlationId = envelope.messageId;
+            outEnv.capturedAt = envelope.capturedAt.value_or(
+                application::to_iso8601(clip.timeWindow().startTime()));
+            outEnv.sequence = next_sequence(outEnv.producer, *outEnv.sessionId);
             nlohmann::json payload;
             payload["clip_id"] = clip.clipId();
             payload["event_id"] = eventId.empty() ? nullptr : nlohmann::json(eventId);
             payload["media_type"] = mediaType;
-            payload["media_uri"] = "s4://clips/" + clipId + ".mp4";
-            payload["start_at"] = now_iso8601_utc();
-            payload["end_at"] = now_iso8601_utc();
+            payload["media_uri"] =
+                "s4://clips/" +
+                std::filesystem::path(clip.filePath()).filename().string();
+            payload["start_at"] = application::to_iso8601(clip.timeWindow().startTime());
+            payload["end_at"] = application::to_iso8601(clip.timeWindow().endTime());
             payload["points_of_interest"] = nlohmann::json::array();
             payload["hash_sha256"] = clip.sha256Hash();
             payload["expires_at"] = now_iso8601_utc();

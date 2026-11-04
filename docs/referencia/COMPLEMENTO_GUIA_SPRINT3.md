@@ -1,6 +1,13 @@
 # Guia Completo de Desenvolvimento de Software — Squad MOD-2
 ## Complemento: Planejamento da Sprint 3 — Integração e Armazenamento em Nuvem
 
+> **ATUALIZAÇÃO (mudança de plano):** a frente de armazenamento em nuvem (GCS,
+> URL assinada, bucket) foi **substituída pela execução na Jetson com mídia no
+> NVMe local**. O plano vigente está em
+> [`docs/PLANO_SPRINT3_JETSON.md`](../PLANO_SPRINT3_JETSON.md). As seções de
+> nuvem abaixo ficam como registro histórico; Kafka segue em uso, com broker
+> configurável e operado pela equipe de integração.
+
 > Complemento do guia [`docs/responsability.md`](responsability.md) / `docs/GUIA_DESENVOLVIMENTO_MOD2.pdf` (seções 1–9).
 > Estende as **seções 4 (Diretrizes de Arquitetura e Submódulos)**, **5 (Arquitetura de Código, DDD)**, **6 (Padrões GoF)** e **9 (Checklist do Desenvolvedor)** para o ciclo de integração entre componentes e substituição do disco físico por armazenamento em nuvem.
 > Referências externas: `docs/ODS 2026_2 — Arquitetura 6c.html` (Especificação de interfaces 1.0) e `docs/Guia_Kafka_B2 (1).PDF`.
@@ -31,7 +38,7 @@ Aplica-se a todo o Squad MOD-2 (Davi Gomes, Henrique Azevedo, Rafael Castro, Edu
 
 **O que o Guia Kafka (B2) exige:**
 
-- Broker em Google Cloud `34.66.235.91:9093` é **temporário** — o endereço tem de ser **configurável** (flag/env), nunca fixo no código.
+- O broker do guia (Google Cloud) é **temporário** — o endereço tem de ser **configurável** (flag/env), nunca fixo no código.
 - Cliente por linguagem: C++ → **librdkafka**; Python → **confluent-kafka**; Node/TS → kafkajs.
 - Validação do envelope B1 em três níveis (JSON válido → campos obrigatórios/schema/versão → payload); fora do formato: **descartar e registrar**.
 - Idempotência por `message_id`; nenhum binário no payload (só referências); `sequence` para detecção de perda.

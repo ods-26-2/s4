@@ -12,6 +12,7 @@
 #include "tests/ods_check.hpp"
 
 #include "s4/application/use_cases/extract_clip.hpp"
+#include "s4/infrastructure/b3_bus/envelope.hpp"
 #include "s4/infrastructure/database/in_memory_media_clip_repository.hpp"
 #include "s4/infrastructure/filesystem/file_storage.hpp"
 #include "s4/infrastructure/gstreamer/mock_ram_buffer_facade.hpp"
@@ -113,13 +114,14 @@ void test_deve_criar_clipe_atraves_de_post() {
     ODS_CHECK(response);
     ODS_CHECK(response->status == 201);
     const std::string& result = response->body;
-    ODS_CHECK(result.find("\"clip_id\": \"clip-") != std::string::npos);
     ODS_CHECK(result.find("\"file_uri\": \"") != std::string::npos);
     ODS_CHECK(result.find("evt-post-001.mp4") != std::string::npos);
     ODS_CHECK(result.find("\"sha256_hash\": \"") != std::string::npos);
 
     const std::string clipId = response_clip_id(result);
     ODS_CHECK(!clipId.empty());
+    ODS_CHECK(infrastructure::is_uuid(clipId));
+    ODS_CHECK(clipId.find("clip-") == std::string::npos);
 
     httplib::Result get;
     for (int attempt = 0; attempt < 40; ++attempt) {

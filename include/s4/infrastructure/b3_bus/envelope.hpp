@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <optional>
 #include <chrono>
@@ -29,5 +30,17 @@ B3Envelope envelope_from_json(const nlohmann::json& j);
 
 std::string generate_message_id();
 std::string now_iso8601_utc();
+
+// Confere se o valor e um UUID canonico (8-4-4-4-12, hexadecimal).
+bool is_uuid(const std::string& value);
+
+// Devolve o UUID em minusculas quando o valor ja e valido. Caso contrario,
+// deriva um UUID deterministico do texto (para nao trocar de sessao a cada
+// mensagem) e, se o valor for vazio, gera um UUID aleatorio.
+std::string normalize_uuid(const std::string& value);
+
+// Sequence por produtor + sessao, conforme o envelope B1. Thread-safe e
+// compartilhado por todos os handlers do processo.
+std::int64_t next_sequence(const std::string& producer, const std::string& sessionId);
 
 } // namespace ods::s4::infrastructure

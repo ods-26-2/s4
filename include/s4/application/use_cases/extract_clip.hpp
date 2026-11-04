@@ -50,7 +50,8 @@ public:
     domain::MediaClip execute(
         const std::string& eventId,
         const domain::TimeWindow& timeWindow,
-        const std::string& destinationPath
+        const std::string& destinationPath,
+        const std::string& clipId = {}
     );
 
     // Janela em relogio de captura. waitTimeoutSeconds e o teto de espera pelo
@@ -60,7 +61,8 @@ public:
         const std::string& eventId,
         const domain::CaptureWindow& window,
         const std::string& destinationPath,
-        double waitTimeoutSeconds = 0.0
+        double waitTimeoutSeconds = 0.0,
+        const std::string& clipId = {}
     );
 
     // Indica se o fluxo real esta disponivel (as duas portas injetadas).

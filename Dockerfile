@@ -121,6 +121,9 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 VOLUME ["/data"]
 
+# Broker padrao historico do guia; pode ser sobrescrito por ODS_S4_KAFKA_* ou
+# pela flag --kafka-brokers no docker-compose. Para subir sem barramento use
+# --kafka-disabled.
 CMD ["/app/s4_media_evidence", "--port", "8080", "--db", "/data/s4.db", "--media-dir", "/data/media", \
      "--kafka-brokers", "34.66.235.91:9093", "--kafka-group-id", "s4-media-evidence", "--kafka-client-id", "s4"]
 

@@ -24,13 +24,13 @@ std::string generate_clip_id() {
     UuidToStringA(&uuid, &str);
     std::string s(reinterpret_cast<char*>(str));
     RpcStringFreeA(&str);
-    return std::string("clip-") + s;
+    return s;
 #else
     uuid_t uuid;
     char buffer[37];
     uuid_generate_random(uuid);
     uuid_unparse_lower(uuid, buffer);
-    return std::string("clip-") + buffer;
+    return std::string(buffer);
 #endif
 }
 
@@ -59,7 +59,8 @@ ExtractClipUseCase::ExtractClipUseCase(
 domain::MediaClip ExtractClipUseCase::execute(
     const std::string& eventId,
     const domain::TimeWindow& timeWindow,
-    const std::string& destinationPath
+    const std::string& destinationPath,
+    const std::string& clipId
 ) {
     const auto frames = m_buffer->readWindow(timeWindow.startTime(), timeWindow.endTime());
     if (frames.empty()) {
@@ -79,7 +80,8 @@ domain::MediaClip ExtractClipUseCase::execute(
     m_fileStorage->write(destinationPath, payload);
     const std::string sha256Hash = infrastructure::compute_sha256_hex(payload);
 
-    domain::MediaClip clip(generate_clip_id(), eventId, destinationPath, sha256Hash, timeWindow);
+    domain::MediaClip clip(clipId.empty() ? generate_clip_id() : clipId, eventId,
+                           destinationPath, sha256Hash, timeWindow);
     m_repository->save(clip);
     return clip;
 }
@@ -88,7 +90,8 @@ domain::MediaClip ExtractClipUseCase::executeCaptureWindow(
     const std::string& eventId,
     const domain::CaptureWindow& window,
     const std::string& destinationPath,
-    double waitTimeoutSeconds
+    double waitTimeoutSeconds,
+    const std::string& clipId
 ) {
     if (!supportsCaptureWindows()) {
         // Falhar e melhor que o caminho legado: o legado gravaria bytes
@@ -124,7 +127,7 @@ domain::MediaClip ExtractClipUseCase::executeCaptureWindow(
     );
 
     domain::MediaClip clip(
-        generate_clip_id(),
+        clipId.empty() ? generate_clip_id() : clipId,
         eventId,
         destinationPath,
         sha256Hash,

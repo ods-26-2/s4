@@ -15,7 +15,7 @@ namespace ods::s4::infrastructure {
 // disputa trava com ninguem, e `grep`/`jq` bastam para auditar.
 //
 // Exemplo de linha:
-//   {"purged_at":"2026-09-29T03:00:00.000Z","clip_id":"clip-...","event_id":"evt-1",
+//   {"purged_at":"2026-09-29T03:00:00.000Z","clip_id":"<uuid>","event_id":"evt-1",
 //    "file_path":"/data/media/evt-1.mp4","reason":"lgpd_retention_expired",
 //    "file":"deleted","bytes_freed":1048576,"disk_used_ratio":0.4210}
 class JsonLinesPurgeLog : public domain::IPurgeLog {

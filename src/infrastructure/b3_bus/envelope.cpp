@@ -1,13 +1,19 @@
 #include "s4/infrastructure/b3_bus/envelope.hpp"
 
+#include "s4/infrastructure/hashing/sha256_hasher.hpp"
+
 #ifdef _WIN32
 #include <rpc.h>
 #else
 #include <uuid/uuid.h>
 #endif
+#include <cctype>
 #include <chrono>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
+#include <unordered_map>
+#include <vector>
 
 namespace ods::s4::infrastructure {
 
@@ -82,6 +88,79 @@ std::string now_iso8601_utc() {
     out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%S")
         << '.' << std::setfill('0') << std::setw(3) << ms.count() << 'Z';
     return out.str();
+}
+
+namespace {
+
+bool is_hex(char c) {
+    return std::isxdigit(static_cast<unsigned char>(c)) != 0;
+}
+
+char hex_digit(int value) {
+    return static_cast<char>(value < 10 ? ('0' + value) : ('a' + value - 10));
+}
+
+std::string lowercase(std::string value) {
+    for (char& c : value) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return value;
+}
+
+std::string format_uuid(const std::string& hex32) {
+    std::string uuid;
+    uuid.reserve(36);
+    for (std::size_t i = 0; i < 32; ++i) {
+        if (i == 8 || i == 12 || i == 16 || i == 20) {
+            uuid.push_back('-');
+        }
+        uuid.push_back(hex32[i]);
+    }
+    return uuid;
+}
+
+} // namespace
+
+bool is_uuid(const std::string& value) {
+    if (value.size() != 36) {
+        return false;
+    }
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (value[i] != '-') {
+                return false;
+            }
+        } else if (!is_hex(value[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string normalize_uuid(const std::string& value) {
+    if (is_uuid(value)) {
+        return lowercase(value);
+    }
+    if (value.empty()) {
+        return generate_message_id();
+    }
+
+    // UUID v4 deterministico: mesma sessao/campo gera sempre o mesmo valor,
+    // sem depender de estado em memoria (sobrevive a reinicio do processo).
+    const std::vector<std::uint8_t> bytes(value.begin(), value.end());
+    std::string hex = compute_sha256_hex(bytes).substr(0, 32);
+    hex[12] = '4';
+    const int variant = static_cast<int>(std::stoi(std::string(1, hex[16]), nullptr, 16));
+    hex[16] = hex_digit((variant & 0x3) | 0x8);
+    return format_uuid(hex);
+}
+
+std::int64_t next_sequence(const std::string& producer, const std::string& sessionId) {
+    static std::mutex mutex;
+    static std::unordered_map<std::string, std::int64_t> sequences;
+    std::lock_guard<std::mutex> lock(mutex);
+    const std::string key = producer + '\x1f' + sessionId;
+    return ++sequences[key];
 }
 
 } // namespace ods::s4::infrastructure
