@@ -273,7 +273,13 @@ std::string to_json(const application::ClipDescriptorDTO& dto) {
     out << "],\n";
     out << "  \"sha256_hash\": \"" << json_escape(dto.sha256Hash) << "\",\n";
     out << "  \"is_retained\": " << (dto.isRetained ? "true" : "false") << ",\n";
-    out << "  \"is_locked_for_audit\": " << (dto.isLockedForAudit ? "true" : "false") << "\n";
+    out << "  \"is_locked_for_audit\": " << (dto.isLockedForAudit ? "true" : "false") << ",\n";
+    out << "  \"media_type\": \"" << json_escape(dto.mediaType) << "\",\n";
+    if (dto.expiresAtIso.empty()) {
+        out << "  \"expires_at\": null\n";
+    } else {
+        out << "  \"expires_at\": \"" << json_escape(dto.expiresAtIso) << "\"\n";
+    }
     out << "}";
     return out.str();
 }
@@ -318,6 +324,15 @@ ClipDescriptorHttpServer::ClipDescriptorHttpServer(
                 if (!descriptor.has_value()) {
                     response.status = 404;
                     response.set_content(R"({"error":"clip not found"})", "application/json");
+                    return;
+                }
+                // 6c: depois de expires_at (ou do expurgo) o clipe nao resolve
+                // mais. 410 diz "existiu e foi descartado", sem o caminho do arquivo.
+                if (!descriptor->isAvailable) {
+                    response.status = 410;
+                    response.set_content(
+                        R"({"status":"ERROR","error":{"code":"CLIP_EXPIRED","message":"clip expired or purged by the retention policy"}})",
+                        "application/json");
                     return;
                 }
                 response.status = 200;

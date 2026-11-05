@@ -8,6 +8,7 @@
 #include <uuid/uuid.h>
 #endif
 
+#include <chrono>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -80,10 +81,8 @@ domain::MediaClip ExtractClipUseCase::execute(
     m_fileStorage->write(destinationPath, payload);
     const std::string sha256Hash = infrastructure::compute_sha256_hex(payload);
 
-    domain::MediaClip clip(clipId.empty() ? generate_clip_id() : clipId, eventId,
-                           destinationPath, sha256Hash, timeWindow);
-    m_repository->save(clip);
-    return clip;
+    return saveClip(clipId, eventId, destinationPath, sha256Hash, timeWindow,
+                    domain::media_kind_of(destinationPath));
 }
 
 domain::MediaClip ExtractClipUseCase::executeCaptureWindow(
@@ -91,7 +90,8 @@ domain::MediaClip ExtractClipUseCase::executeCaptureWindow(
     const domain::CaptureWindow& window,
     const std::string& destinationPath,
     double waitTimeoutSeconds,
-    const std::string& clipId
+    const std::string& clipId,
+    domain::MediaKind mediaKind
 ) {
     if (!supportsCaptureWindows()) {
         // Falhar e melhor que o caminho legado: o legado gravaria bytes
@@ -126,14 +126,39 @@ domain::MediaClip ExtractClipUseCase::executeCaptureWindow(
         m_captureBuffer->toWallClock(window.endNs())
     );
 
+    return saveClip(clipId, eventId, destinationPath, sha256Hash, wallWindow, mediaKind);
+}
+
+domain::MediaClip ExtractClipUseCase::saveClip(
+    const std::string& clipId,
+    const std::string& eventId,
+    const std::string& path,
+    const std::string& sha256Hash,
+    const domain::TimeWindow& window,
+    domain::MediaKind kind
+) {
+    const auto createdAt = std::chrono::system_clock::now();
     domain::MediaClip clip(
         clipId.empty() ? generate_clip_id() : clipId,
         eventId,
-        destinationPath,
+        path,
         sha256Hash,
-        wallWindow
+        window,
+        true,
+        false,
+        createdAt,
+        {},
+        kind,
+        m_retention.expiryFor(kind, createdAt)
     );
     m_repository->save(clip);
+    if (m_onClipSaved) {
+        try {
+            m_onClipSaved(clip);
+        } catch (const std::exception&) {
+            // O clipe ja esta em disco e no banco; o aviso e so um atalho.
+        }
+    }
     return clip;
 }
 

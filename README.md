@@ -193,9 +193,9 @@ Resumo; o detalhamento está em [`docs/S4.3-retencao-expurgo.md`](docs/S4.3-rete
 
 | | |
 | :--- | :--- |
-| **Recebe** | Ocupação do NVMe (`statvfs` no `--media-dir`) + clipes do SQLite com `created_at`, `is_retained` e `is_locked_for_audit` |
-| **Faz** | Um daemon varre ao iniciar, a cada 1 h e **na hora** em que o disco passa de 85% (checagem a cada 30 s). Cada varredura aplica, em ordem, `LgpdRetentionStrategy` (idade ≥ 7 dias) e `DiskQuotaFifoStrategy` (mais antigo primeiro, até 80%). Mídia travada para auditoria nunca é apagada — a trava é relida logo antes de cada exclusão |
-| **Entrega** | Arquivo removido do NVMe, `is_retained = false` no SQLite (a API passa a mostrar isso), uma linha por mídia em `s4_purge_log.jsonl` e, se o disco está cheio sem nada apagável, `DiskQuotaExceededError` (alerta `[S4.3] ALERT` no stderr) |
+| **Recebe** | Ocupação do NVMe (`statvfs` no `--media-dir`; opcionalmente também a cota `--media-quota-bytes` do diretório) + clipes do SQLite com `created_at`, `media_type`, `expires_at`, `is_retained` e `is_locked_for_audit` + aviso de cada clipe novo |
+| **Faz** | Um daemon varre ao iniciar, a cada 1 h e **na hora** em que o disco passa de 85% (checagem a cada 30 s). Cada varredura aplica, em ordem, `LgpdRetentionStrategy` (vencimento de cada tipo: clipe e snapshot têm prazos próprios) e `DiskQuotaFifoStrategy` (mais antigo primeiro, até 80%). Mídia travada para auditoria nunca é apagada — a trava é relida logo antes de cada exclusão |
+| **Entrega** | `expires_at` real em `ods.s4.clip`; depois dele, HTTP 410 e `clip.query` vazio (mesmo antes da varredura); arquivo removido do NVMe, `is_retained = false` no SQLite, uma linha por mídia em `s4_purge_log.jsonl` e, se o disco está cheio sem nada apagável, `DiskQuotaExceededError` (alerta `[S4.3] ALERT` no stderr) |
 
 ---
 
@@ -292,7 +292,8 @@ ls -lh /dev/shm/ods_s4_ring_cam0         # o buffer circular, enquanto o daemon 
 O daemon também sobe o expurgo do S4.3. Parâmetros opcionais (padrões do guia):
 
 ```bash
-./s4_media_evidence ... --retention-days 7 --quota-trigger 0.85 --quota-target 0.80 \
+./s4_media_evidence ... --retention-days 7 --snapshot-retention-days 7 \
+    --quota-trigger 0.85 --quota-target 0.80 --media-quota-bytes 0 \
     --sweep-interval 3600 --disk-check-interval 30 --purge-log /tmp/s4_purge_log.jsonl
 ```
 

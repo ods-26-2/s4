@@ -1,4 +1,5 @@
 #include "s4/infrastructure/b3_bus/handlers/capture_command_handler.hpp"
+#include "s4/infrastructure/b3_bus/clip_payload.hpp"
 #include "s4/application/dtos/iso_time_utils.hpp"
 #include "s4/domain/value_objects/capture_window.hpp"
 #include "s4/domain/errors/domain_error.hpp"
@@ -94,7 +95,8 @@ void CaptureCommandHandler::operator()(const std::string& topic, const B3Envelop
                 window = domain::CaptureWindow::around(ts, 5.0, 5.0);
             }
             auto clip = m_extractClip->executeCaptureWindow(
-                eventId.empty() ? clipId : eventId, window, out, 10.0, clipId);
+                eventId.empty() ? clipId : eventId, window, out, 10.0, clipId,
+                mediaType == "SNAPSHOT" ? domain::MediaKind::Snapshot : domain::MediaKind::VideoClip);
             B3Envelope outEnv;
             outEnv.messageType = "event";
             outEnv.messageId = generate_message_id();
@@ -109,18 +111,8 @@ void CaptureCommandHandler::operator()(const std::string& topic, const B3Envelop
             outEnv.capturedAt = envelope.capturedAt.value_or(
                 application::to_iso8601(clip.timeWindow().startTime()));
             outEnv.sequence = next_sequence(outEnv.producer, *outEnv.sessionId);
-            nlohmann::json payload;
-            payload["clip_id"] = clip.clipId();
+            nlohmann::json payload = clip_payload(clip);
             payload["event_id"] = eventId.empty() ? nullptr : nlohmann::json(eventId);
-            payload["media_type"] = mediaType;
-            payload["media_uri"] =
-                "s4://clips/" +
-                std::filesystem::path(clip.filePath()).filename().string();
-            payload["start_at"] = application::to_iso8601(clip.timeWindow().startTime());
-            payload["end_at"] = application::to_iso8601(clip.timeWindow().endTime());
-            payload["points_of_interest"] = nlohmann::json::array();
-            payload["hash_sha256"] = clip.sha256Hash();
-            payload["expires_at"] = now_iso8601_utc();
             outEnv.payload = payload;
             if (m_transport) m_transport->publish("ods.s4.clip", outEnv);
         } catch (const domain::OutOfBufferError& e) {

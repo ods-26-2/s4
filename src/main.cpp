@@ -14,6 +14,7 @@
 #include "s4/infrastructure/gstreamer/ring_buffer_ram_facade.hpp"
 #include "s4/infrastructure/retention/json_lines_purge_log.hpp"
 #include "s4/infrastructure/retention/purge_daemon.hpp"
+#include "s4/infrastructure/retention/media_directory_usage_provider.hpp"
 #include "s4/infrastructure/retention/statvfs_disk_usage_provider.hpp"
 #include "s4/infrastructure/retention/system_clock.hpp"
 #include "s4/infrastructure/ringbuffer/fake_p4_producer.hpp"
@@ -56,7 +57,8 @@ void print_usage(const char* program) {
                  "       [--window-seconds N] [--bitrate BPS]\n"
                  "       [--pre-roll-seconds N] [--max-rule-persistence-seconds N]\n"
                  "       [--event-latency-seconds N] [--max-post-seconds N]\n"
-                 "       [--retention-days DAYS] [--quota-trigger RATIO] [--quota-target RATIO]\n"
+                 "       [--retention-days DAYS] [--snapshot-retention-days DAYS]\n"
+                 "       [--quota-trigger RATIO] [--quota-target RATIO] [--media-quota-bytes BYTES]\n"
                  "       [--sweep-interval SECONDS] [--disk-check-interval SECONDS] [--purge-log PATH]\n"
                  "\n"
                  "  --source FILE     replay de um MP4 H.264 existente, em vez da\n"
@@ -86,7 +88,11 @@ void print_usage(const char* program) {
                  "  --event-latency-seconds N  folga de entrega do evento S2 -> S4 (padrao: 2)\n"
                  "  --max-post-seconds N  post_s maximo de um pedido (padrao: 10)\n"
                  "\n"
-                 "  --retention-days N   dias que a midia fica guardada (padrao: 7, LGPD)\n"
+                 "  --retention-days N   dias que um clipe fica guardado (padrao: 7, LGPD;\n"
+                 "                    aceita fracao: 0.001 = 86 s, para demonstracao)\n"
+                 "  --snapshot-retention-days N  prazo dos snapshots (padrao: o dos clipes)\n"
+                 "  --media-quota-bytes N  teto do diretorio de midias do S4; vale o mais\n"
+                 "                    apertado entre ele e o NVMe (padrao: 0 = so o NVMe)\n"
                  "  --quota-trigger R     ocupacao do NVMe que dispara o expurgo (padrao: 0.85)\n"
                  "  --quota-target R      ocupacao a que o expurgo volta (padrao: 0.80)\n"
                  "  --sweep-interval N      segundos entre varreduras de prazo (padrao: 3600)\n"
@@ -146,6 +152,11 @@ double resolve_window_seconds(
 // gatilho de 85% do NVMe.
 struct RetentionOptions {
     double retentionDays{7.0};
+    // Snapshot com prazo proprio (item 10). Sem o flag, segue o dos clipes.
+    std::optional<double> snapshotRetentionDays;
+    // Teto em bytes para o diretorio de midias do S4 (item 12). 0 = desligado:
+    // so o statvfs do NVMe inteiro conta.
+    std::uintmax_t mediaQuotaBytes{0};
     double quotaTrigger{ods::s4::domain::QuotaPolicy::kDefaultTriggerRatio};
     double quotaTarget{ods::s4::domain::QuotaPolicy::kDefaultTargetRatio};
     long long sweepIntervalSeconds{3600};
@@ -157,17 +168,34 @@ struct RetentionOptions {
 // O chamador tambem precisa deles: o extrator de clipes usa o mesmo repositorio
 // e o mesmo FileStorage, e um std::move no call site deixaria o extrator com
 // ponteiro nulo — sintoma: expurgo funcionando e API sem responder.
+ods::s4::domain::RetentionPolicy make_retention_policy(const RetentionOptions& options) {
+    const auto toSeconds = [](double days) {
+        return std::chrono::seconds(static_cast<long long>(days * 24 * 3600));
+    };
+    return ods::s4::domain::RetentionPolicy(
+        toSeconds(options.retentionDays),
+        toSeconds(options.snapshotRetentionDays.value_or(options.retentionDays)));
+}
+
 std::unique_ptr<ods::s4::infrastructure::PurgeDaemon> make_purge_daemon(
     const RetentionOptions& options,
+    const ods::s4::domain::RetentionPolicy& retention,
     std::shared_ptr<ods::s4::domain::IMediaClipRepository> repository,
     std::shared_ptr<ods::s4::domain::IFileStorage> fileStorage,
     const std::string& mediaDir
 ) {
     using namespace ods::s4;
-    const domain::RetentionPolicy retention(std::chrono::seconds(
-        static_cast<long long>(options.retentionDays * 24 * 3600)));
     const domain::QuotaPolicy quota(options.quotaTrigger, options.quotaTarget);
-    auto diskUsage = std::make_shared<infrastructure::StatvfsDiskUsageProvider>(mediaDir);
+    std::shared_ptr<domain::IDiskUsageProvider> diskUsage =
+        std::make_shared<infrastructure::StatvfsDiskUsageProvider>(mediaDir);
+    if (options.mediaQuotaBytes > 0) {
+        diskUsage = std::make_shared<infrastructure::MostPressingDiskUsageProvider>(
+            std::vector<std::shared_ptr<const domain::IDiskUsageProvider>>{
+                diskUsage,
+                std::make_shared<infrastructure::MediaDirectoryUsageProvider>(
+                    mediaDir, options.mediaQuotaBytes),
+            });
+    }
 
     auto purgeMedia = std::make_shared<application::PurgeMediaUseCase>(
         std::move(repository), std::move(fileStorage), diskUsage,
@@ -419,6 +447,10 @@ int main(int argc, char* argv[]) {
                 runScenario = true;
             } else if (read_value("--retention-days")) {
                 retentionOptions.retentionDays = std::stod(argv[i]);
+            } else if (read_value("--snapshot-retention-days")) {
+                retentionOptions.snapshotRetentionDays = std::stod(argv[i]);
+            } else if (read_value("--media-quota-bytes")) {
+                retentionOptions.mediaQuotaBytes = std::stoull(argv[i]);
             } else if (read_value("--quota-trigger")) {
                 retentionOptions.quotaTrigger = std::stod(argv[i]);
             } else if (read_value("--quota-target")) {
@@ -596,11 +628,19 @@ int main(int argc, char* argv[]) {
     // usa os mesmos dois.
     std::unique_ptr<ods::s4::infrastructure::PurgeDaemon> purgeDaemon;
     try {
-        purgeDaemon = make_purge_daemon(retentionOptions, repository, fileStorage, mediaDir);
+        const auto retention = make_retention_policy(retentionOptions);
+        // O expires_at publicado em ods.s4.clip sai desta mesma politica.
+        extractClip->setRetentionPolicy(retention);
+        purgeDaemon = make_purge_daemon(retentionOptions, retention, repository, fileStorage, mediaDir);
     } catch (const ods::s4::domain::ODSBaseException& error) {
         std::cerr << "invalid retention settings: " << error.what() << std::endl;
         return 1;
     }
+
+    // Todo clipe novo acorda o daemon: ele pode ter passado o disco do
+    // gatilho de cota, e a varredura nao espera o proximo statvfs.
+    extractClip->setOnClipSaved(
+        [daemon = purgeDaemon.get()](const ods::s4::domain::MediaClip&) { daemon->requestSweep(); });
 
     mediaBuffer->startCapture(sessionId);
     purgeDaemon->start();
@@ -671,9 +711,15 @@ int main(int argc, char* argv[]) {
               << "/api/v1/clips/{id} (acesse pelo IP da Jetson)\n";
     std::cout << "Simulate an event: POST http://<ip-da-jetson>:" << port
               << "/api/v1/events\n";
-    std::cout << "Purge daemon: retention " << retentionOptions.retentionDays << " d, quota "
+    std::cout << "Purge daemon: retention " << retentionOptions.retentionDays << " d (snapshot "
+              << retentionOptions.snapshotRetentionDays.value_or(retentionOptions.retentionDays)
+              << " d), quota "
               << retentionOptions.quotaTrigger * 100 << "% -> " << retentionOptions.quotaTarget * 100
-              << "%, log " << retentionOptions.purgeLogPath << '\n';
+              << "%, log " << retentionOptions.purgeLogPath;
+    if (retentionOptions.mediaQuotaBytes > 0) {
+        std::cout << ", media quota " << retentionOptions.mediaQuotaBytes << " B";
+    }
+    std::cout << '\n';
     const auto& activeBufferConfig = mediaBuffer->config();
     std::cout << "Ring buffer: " << activeBufferConfig.windowSeconds << " s ("
               << depthRequirement->describe() << " required), "

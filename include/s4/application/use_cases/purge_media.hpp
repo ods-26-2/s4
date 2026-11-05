@@ -45,6 +45,10 @@ public:
 
 private:
     [[nodiscard]] std::vector<domain::PurgeCandidate> loadCandidates() const;
+    void attributeFileSizes(std::vector<domain::PurgeCandidate>& candidates) const;
+    [[nodiscard]] bool isFileHeldByClipOutside(
+        const std::vector<domain::PurgeCandidate>& candidates,
+        const domain::MediaClip& clip) const;
     [[nodiscard]] std::uintmax_t measuredSize(const std::string& path) const;
     void applyStrategy(
         const domain::IRetentionStrategy& strategy,

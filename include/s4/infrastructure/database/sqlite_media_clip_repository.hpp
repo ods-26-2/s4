@@ -22,6 +22,7 @@ public:
 
 private:
     void initSchema();
+    void migrateSchema();
 
     std::string m_dbPath;
     sqlite3* m_db{nullptr};

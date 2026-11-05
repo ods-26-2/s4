@@ -1,4 +1,5 @@
 #include "s4/infrastructure/b3_bus/handlers/s2_event_handler.hpp"
+#include "s4/infrastructure/b3_bus/clip_payload.hpp"
 #include "s4/application/dtos/iso_time_utils.hpp"
 #include "s4/domain/value_objects/capture_window.hpp"
 #include "s4/domain/errors/domain_error.hpp"
@@ -106,18 +107,8 @@ void S2EventHandler::operator()(const std::string& topic, const B3Envelope& enve
             outEnv.capturedAt = envelope.capturedAt.value_or(
                 application::to_iso8601(clip.timeWindow().startTime()));
             outEnv.sequence = next_sequence(outEnv.producer, *outEnv.sessionId);
-            nlohmann::json payload;
-            payload["clip_id"] = clip.clipId();
+            nlohmann::json payload = clip_payload(clip);
             payload["event_id"] = eventId.empty() ? nullptr : nlohmann::json(eventId);
-            payload["media_type"] = "CLIP";
-            payload["media_uri"] =
-                "s4://clips/" +
-                std::filesystem::path(clip.filePath()).filename().string();
-            payload["start_at"] = application::to_iso8601(clip.timeWindow().startTime());
-            payload["end_at"] = application::to_iso8601(clip.timeWindow().endTime());
-            payload["points_of_interest"] = nlohmann::json::array();
-            payload["hash_sha256"] = clip.sha256Hash();
-            payload["expires_at"] = now_iso8601_utc();
             outEnv.payload = payload;
             if (m_transport) m_transport->publish("ods.s4.clip", outEnv);
             std::cerr << "S2 event clip published: clip_id=" << clip.clipId() << std::endl;

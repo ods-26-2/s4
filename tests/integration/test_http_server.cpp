@@ -11,6 +11,7 @@
 #include "s4/domain/value_objects/time_window.hpp"
 #include "s4/infrastructure/database/in_memory_media_clip_repository.hpp"
 #include "s4/presentation/http/clip_descriptor_http_server.hpp"
+#include "tests/ods_check.hpp"
 
 using namespace ods::s4;
 
@@ -103,11 +104,66 @@ void test_deve_responder_200_no_healthz() {
     server.stop();
 }
 
+httplib::Result get_until(int port, const std::string& path, int status) {
+    httplib::Client client("127.0.0.1", port);
+    httplib::Result response;
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        response = client.Get(path);
+        if (response && response->status == status) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return response;
+}
+
+void test_deve_expor_media_type_e_expires_at_quando_clipe_estiver_no_prazo() {
+    auto repository = std::make_shared<infrastructure::InMemoryMediaClipRepository>();
+    const auto now = std::chrono::system_clock::now();
+    repository->save(domain::MediaClip(
+        "clip-prazo", "evt", "/nvme/clips/clip-prazo.mp4", "sha",
+        domain::TimeWindow(now, now + std::chrono::seconds(1)), true, false, now, {},
+        domain::MediaKind::Snapshot, now + std::chrono::hours(24)));
+    presentation::ClipDescriptorHttpServer server(repository);
+    ODS_CHECK(server.bind(0) && server.start());
+
+    const auto response = get_until(server.port(), "/api/v1/clips/clip-prazo", 200);
+    ODS_CHECK(response && response->status == 200);
+    ODS_CHECK(response->body.find("\"media_type\": \"SNAPSHOT\"") != std::string::npos);
+    ODS_CHECK(response->body.find("\"expires_at\": \"") != std::string::npos);
+    server.stop();
+}
+
+// 6c: depois de expires_at o media_uri nao resolve, mesmo antes da varredura.
+void test_deve_responder_410_sem_caminho_quando_clipe_vencer_ou_for_expurgado() {
+    auto repository = std::make_shared<infrastructure::InMemoryMediaClipRepository>();
+    const auto now = std::chrono::system_clock::now();
+    const domain::TimeWindow window(now - std::chrono::seconds(10), now);
+    repository->save(domain::MediaClip(
+        "clip-vencido", "evt", "/nvme/clips/clip-vencido.mp4", "sha", window, true, false,
+        now - std::chrono::hours(48), {}, domain::MediaKind::VideoClip, now - std::chrono::seconds(1)));
+    repository->save(domain::MediaClip(
+        "clip-expurgado", "evt", "/nvme/clips/clip-expurgado.mp4", "sha", window, false, false,
+        now, {}, domain::MediaKind::VideoClip, now + std::chrono::hours(1)));
+    presentation::ClipDescriptorHttpServer server(repository);
+    ODS_CHECK(server.bind(0) && server.start());
+
+    for (const std::string id : {"clip-vencido", "clip-expurgado"}) {
+        const auto response = get_until(server.port(), "/api/v1/clips/" + id, 410);
+        ODS_CHECK(response && response->status == 410);
+        ODS_CHECK(response->body.find("CLIP_EXPIRED") != std::string::npos);
+        ODS_CHECK(response->body.find("/nvme/clips") == std::string::npos);
+    }
+    server.stop();
+}
+
 int main() {
     std::cout << "Running S4 HTTP Server Integration Tests...\n";
     test_deve_responder_200_com_json_dto_quando_clipe_existe();
     test_deve_responder_404_quando_clipe_nao_existe();
     test_deve_responder_200_no_healthz();
+    test_deve_expor_media_type_e_expires_at_quando_clipe_estiver_no_prazo();
+    test_deve_responder_410_sem_caminho_quando_clipe_vencer_ou_for_expurgado();
     std::cout << "All S4 HTTP tests passed successfully!\n";
     return 0;
 }

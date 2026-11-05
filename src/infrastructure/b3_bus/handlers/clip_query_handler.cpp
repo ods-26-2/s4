@@ -1,4 +1,5 @@
 #include "s4/infrastructure/b3_bus/handlers/clip_query_handler.hpp"
+#include "s4/infrastructure/b3_bus/clip_payload.hpp"
 #include <nlohmann/json.hpp>
 #include <chrono>
 
@@ -33,36 +34,20 @@ void ClipQueryHandler::operator()(const std::string& topic, const B3Envelope& en
             }
             return;
         }
+        // "Lista vazia se expirou" (6c): clipe expurgado, ou vencido e ainda
+        // nao varrido pelo daemon, nao aparece na resposta.
+        const auto now = std::chrono::system_clock::now();
         nlohmann::json clips = nlohmann::json::array();
         if (hasClipId && m_repository) {
             auto c = m_repository->findById(p["clip_id"].get<std::string>());
-            if (c) {
-                nlohmann::json cj;
-                cj["clip_id"] = c->clipId();
-                cj["event_id"] = c->eventId().empty() ? nullptr : nlohmann::json(c->eventId());
-                cj["media_type"] = "CLIP";
-                cj["media_uri"] = c->filePath();
-                cj["start_at"] = now_iso8601_utc();
-                cj["end_at"] = now_iso8601_utc();
-                cj["points_of_interest"] = nlohmann::json::array();
-                cj["hash_sha256"] = c->sha256Hash();
-                cj["expires_at"] = now_iso8601_utc();
-                clips.push_back(cj);
+            if (c && c->isAvailableAt(now)) {
+                clips.push_back(clip_payload(*c));
             }
         } else if (hasEventId && m_repository) {
-            auto list = m_repository->findByEventId(p["event_id"].get<std::string>());
-            for (const auto& c : list) {
-                nlohmann::json cj;
-                cj["clip_id"] = c.clipId();
-                cj["event_id"] = c.eventId().empty() ? nullptr : nlohmann::json(c.eventId());
-                cj["media_type"] = "CLIP";
-                cj["media_uri"] = c.filePath();
-                cj["start_at"] = now_iso8601_utc();
-                cj["end_at"] = now_iso8601_utc();
-                cj["points_of_interest"] = nlohmann::json::array();
-                cj["hash_sha256"] = c.sha256Hash();
-                cj["expires_at"] = now_iso8601_utc();
-                clips.push_back(cj);
+            for (const auto& c : m_repository->findByEventId(p["event_id"].get<std::string>())) {
+                if (c.isAvailableAt(now)) {
+                    clips.push_back(clip_payload(c));
+                }
             }
         }
         if (m_transport && envelope.messageId.size()) {

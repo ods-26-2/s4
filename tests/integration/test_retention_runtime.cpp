@@ -20,6 +20,7 @@
 #include "s4/infrastructure/filesystem/file_storage.hpp"
 #include "s4/infrastructure/retention/json_lines_purge_log.hpp"
 #include "s4/infrastructure/retention/purge_daemon.hpp"
+#include "s4/infrastructure/retention/media_directory_usage_provider.hpp"
 #include "s4/infrastructure/retention/statvfs_disk_usage_provider.hpp"
 #include "tests/unit/fakes/retention_fakes.hpp"
 
@@ -340,6 +341,91 @@ void test_deve_continuar_vivo_quando_varredura_falhar() {
     daemon.stop();
 }
 
+// ======================================================= cota do diretorio
+
+void test_deve_medir_so_o_diretorio_de_midias_contra_a_cota_quando_configurada() {
+    TempDir dir("s4_media_quota_");
+    write_file((fs::path(dir.path()) / "a.mp4").string(), 300);
+    fs::create_directories(fs::path(dir.path()) / "sub");
+    write_file((fs::path(dir.path()) / "sub" / "b.jpg").string(), 200);
+    const infrastructure::MediaDirectoryUsageProvider provider(dir.path(), 1000);
+
+    const domain::DiskUsage usage = provider.currentUsage();
+
+    ODS_CHECK(usage.usedBytes() == 500u);
+    ODS_CHECK(usage.capacityBytes() == 1000u);
+}
+
+void test_deve_reportar_cheio_quando_diretorio_passar_da_cota() {
+    TempDir dir("s4_media_quota_full_");
+    write_file((fs::path(dir.path()) / "a.mp4").string(), 1500);
+    const infrastructure::MediaDirectoryUsageProvider provider(dir.path(), 1000);
+    const domain::DiskUsage usage = provider.currentUsage();
+    ODS_CHECK(usage.capacityBytes() == 1000u);
+    ODS_CHECK(usage.usedRatio() == 1.5);
+    ODS_CHECK(usage.availableBytes() == 0u);
+    ODS_CHECK(usage.afterFreeing(800).usedRatio() == 0.7);
+}
+
+void test_deve_valer_a_medida_mais_apertada_quando_cota_e_nvme_estiverem_ligados() {
+    TempDir dir("s4_media_quota_combo_");
+    write_file((fs::path(dir.path()) / "a.mp4").string(), 900);
+    const infrastructure::MostPressingDiskUsageProvider provider({
+        std::make_shared<infrastructure::StatvfsDiskUsageProvider>(dir.path()),
+        std::make_shared<infrastructure::MediaDirectoryUsageProvider>(dir.path(), 1000),
+    });
+    ODS_CHECK(provider.currentUsage().usedBytes() == 900u);  // 90% da cota do S4
+}
+
+// Um clipe novo que passa a cota dispara o expurgo pelo aviso do extrator,
+// sem esperar o statvfs: aqui o daemon so acorda por requestSweep.
+void test_deve_expurgar_pela_cota_do_diretorio_quando_requestsweep_for_chamado() {
+    TempDir dir("s4_media_quota_sweep_");
+    const std::string db = (fs::path(dir.path()) / "s4.db").string();
+    const std::string media = (fs::path(dir.path()) / "media").string();
+    fs::create_directories(media);
+    auto repository = std::make_shared<infrastructure::SQLiteMediaClipRepository>(db);
+    const auto now = std::chrono::system_clock::now();
+    for (int i = 0; i < 3; ++i) {
+        const std::string path = (fs::path(media) / ("c" + std::to_string(i) + ".mp4")).string();
+        write_file(path, 400);
+        repository->save(domain::MediaClip(
+            "c" + std::to_string(i), "evt-" + std::to_string(i), path, "h",
+            domain::TimeWindow(now - std::chrono::seconds(1), now), true, false, now - std::chrono::minutes(10 - i)));
+    }
+    auto diskUsage = std::make_shared<infrastructure::MediaDirectoryUsageProvider>(media, 1000);
+    const domain::QuotaPolicy quota(0.85, 0.80);
+    auto purge = std::make_shared<application::PurgeMediaUseCase>(
+        repository, std::make_shared<infrastructure::FileStorage>(), diskUsage,
+        std::make_shared<infrastructure::JsonLinesPurgeLog>((fs::path(dir.path()) / "log.jsonl").string()),
+        std::make_shared<test::FakeClock>(now),
+        std::vector<std::shared_ptr<const domain::IRetentionStrategy>>{
+            std::make_shared<domain::LgpdRetentionStrategy>(domain::RetentionPolicy()),
+            std::make_shared<domain::DiskQuotaFifoStrategy>(quota)});
+    infrastructure::PurgeDaemonConfig config;
+    config.retentionSweepInterval = std::chrono::hours(1);
+    config.diskCheckInterval = std::chrono::hours(1);
+    infrastructure::PurgeDaemon daemon(purge, diskUsage, quota, config);
+    daemon.start();
+    ODS_CHECK(daemon.waitForSweeps(1, std::chrono::seconds(5)));  // varredura da subida
+
+    // 1200/1000 (120%) na subida: apagar so c0 deixaria 80%, que nao esta
+    // abaixo do alvo; saem c0 e c1 (400/1000).
+    ODS_CHECK(!repository->findById("c0")->isRetained());
+    ODS_CHECK(!repository->findById("c1")->isRetained());
+    ODS_CHECK(repository->findById("c2")->isRetained());
+
+    const std::string extra = (fs::path(media) / "c3.mp4").string();
+    write_file(extra, 600);  // 1000/1000
+    repository->save(domain::MediaClip("c3", "evt-3", extra, "h", domain::TimeWindow(now - std::chrono::seconds(1), now),
+                                       true, false, now));
+    daemon.requestSweep();
+    ODS_CHECK(daemon.waitForSweeps(2, std::chrono::seconds(5)));
+    ODS_CHECK(!repository->findById("c2")->isRetained());
+    ODS_CHECK(repository->findById("c3")->isRetained());
+    daemon.stop();
+}
+
 int main() {
     test_deve_ler_ocupacao_real_quando_caminho_estiver_no_volume();
     test_deve_lancar_excecao_quando_caminho_do_volume_nao_existir();
@@ -353,6 +439,11 @@ int main() {
     test_deve_varrer_sem_esperar_o_intervalo_quando_disco_atingir_o_gatilho();
     test_deve_parar_rapidamente_quando_daemon_estiver_ocioso();
     test_deve_continuar_vivo_quando_varredura_falhar();
+
+    test_deve_medir_so_o_diretorio_de_midias_contra_a_cota_quando_configurada();
+    test_deve_reportar_cheio_quando_diretorio_passar_da_cota();
+    test_deve_valer_a_medida_mais_apertada_quando_cota_e_nvme_estiverem_ligados();
+    test_deve_expurgar_pela_cota_do_diretorio_quando_requestsweep_for_chamado();
 
     std::cout << "test_s4_retention_runtime: all tests passed\n";
     return 0;

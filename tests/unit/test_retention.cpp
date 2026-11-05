@@ -5,6 +5,7 @@
 #include <chrono>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -460,6 +461,96 @@ void test_deve_reportar_falha_quando_log_de_expurgo_nao_puder_ser_gravado() {
     ODS_CHECK(report.failures.front().message.find("not logged") != std::string::npos);
 }
 
+// ============================================ expires_at e tipo persistidos
+
+domain::MediaClip clip_with(Clock::duration age, std::optional<domain::MediaKind> kind,
+                            std::optional<Clock::time_point> expiresAt,
+                            bool isLockedForAudit = false, bool isRetained = true) {
+    const auto createdAt = kNow - age;
+    return domain::MediaClip("c", "evt-c", "/nvme/c.mp4", "sha",
+                             domain::TimeWindow(createdAt - seconds(10), createdAt),
+                             isRetained, isLockedForAudit,
+                             std::chrono::time_point_cast<Clock::duration>(createdAt), {},
+                             kind, expiresAt);
+}
+
+void test_deve_vencer_pelo_prazo_novo_quando_politica_for_encurtada_depois_da_gravacao() {
+    // Publicado com 7 dias; o operador reduziu para 1 dia: vale o menor.
+    const auto clip = clip_with(2 * kDay, std::nullopt, kNow + 5 * kDay);
+    ODS_CHECK(domain::RetentionPolicy(hours(24)).hasExpired(clip, kNow));
+}
+
+void test_deve_honrar_expires_at_publicado_quando_politica_for_alongada_depois_da_gravacao() {
+    // Publicado com 1 dia; o operador subiu para 30: a promessa publicada vale.
+    const auto clip = clip_with(2 * kDay, std::nullopt, kNow - kDay);
+    ODS_CHECK(domain::RetentionPolicy(hours(24 * 30)).hasExpired(clip, kNow));
+}
+
+void test_deve_aplicar_prazo_de_snapshot_quando_tipo_gravado_for_snapshot_mesmo_em_mp4() {
+    const domain::RetentionPolicy policy(hours(24 * 7), hours(24));
+    const auto snapshot = clip_with(2 * kDay, domain::MediaKind::Snapshot, std::nullopt);
+    const auto clip = clip_with(2 * kDay, domain::MediaKind::VideoClip, std::nullopt);
+    ODS_CHECK(snapshot.mediaKind() == domain::MediaKind::Snapshot);
+    ODS_CHECK(policy.hasExpired(snapshot, kNow));
+    ODS_CHECK(!policy.hasExpired(clip, kNow));
+}
+
+void test_deve_calcular_expires_at_pelo_tipo_quando_clipe_nascer() {
+    const domain::RetentionPolicy policy(hours(24 * 7), hours(24));
+    ODS_CHECK(policy.expiryFor(domain::MediaKind::Snapshot, kNow) == kNow + kDay);
+    ODS_CHECK(policy.expiryFor(domain::MediaKind::VideoClip, kNow) == kNow + 7 * kDay);
+}
+
+void test_nao_deve_estar_disponivel_quando_expires_at_passar_mesmo_sem_varredura() {
+    ODS_CHECK(clip_with(kDay, std::nullopt, kNow + seconds(1)).isAvailableAt(kNow));
+    ODS_CHECK(!clip_with(kDay, std::nullopt, kNow).isAvailableAt(kNow));
+    ODS_CHECK(!clip_with(kDay, std::nullopt, kNow + kDay, false, false).isAvailableAt(kNow));
+    // Travado para auditoria: guardado alem do prazo justamente para ser lido.
+    ODS_CHECK(clip_with(kDay, std::nullopt, kNow - kDay, true).isAvailableAt(kNow));
+}
+
+void test_deve_traduzir_tipo_de_midia_para_o_nome_do_contrato() {
+    ODS_CHECK(std::string(domain::to_contract_name(domain::MediaKind::Snapshot)) == "SNAPSHOT");
+    ODS_CHECK(std::string(domain::to_contract_name(domain::MediaKind::VideoClip)) == "CLIP");
+    ODS_CHECK(domain::media_kind_from_contract_name("SNAPSHOT") == domain::MediaKind::Snapshot);
+    ODS_CHECK(!domain::media_kind_from_contract_name("VIDEO").has_value());
+}
+
+// ============================ cota com arquivo compartilhado entre clipes
+
+void test_deve_expurgar_os_dois_donos_quando_cota_precisar_do_arquivo_compartilhado() {
+    PurgeFixture fixture(640);
+    fixture.store({"antigo", 4 * kDay, false, true, ".mp4", "evt-x"}, 100);
+    fixture.repository->save(make_clip({"reenvio", 3 * kDay, false, true, ".mp4", "evt-x"}));
+    fixture.store({"d2", 2 * kDay}, 100);
+    fixture.store({"d1", 1 * kDay}, 50);  // 890/1000 = 89%
+
+    const auto report = fixture.useCase().execute();
+
+    // Alvo e "abaixo de 80%": liberar o arquivo compartilhado leva a 79%.
+    // Antes: "antigo" projetava 100 B, a cota parava nele e nada era liberado.
+    ODS_CHECK(!fixture.isRetained("antigo") && !fixture.isRetained("reenvio"));
+    ODS_CHECK(!fixture.volume->exists("/nvme/evt-x.mp4"));
+    ODS_CHECK(fixture.isRetained("d2") && fixture.isRetained("d1"));
+    ODS_CHECK(report.diskUsageAfter.usedBytes() == 790u);
+    ODS_CHECK(report.purged.back().fileOutcome == FileOutcome::Deleted);
+    ODS_CHECK(report.purged.back().bytesFreed == 100u);
+}
+
+void test_nao_deve_contar_arquivo_preso_por_clipe_travado_quando_projetar_a_cota() {
+    PurgeFixture fixture(700);
+    fixture.store({"antigo", 4 * kDay, false, true, ".mp4", "evt-y"}, 100);
+    fixture.repository->save(make_clip({"travado", 3 * kDay, true, true, ".mp4", "evt-y"}));
+    fixture.store({"d1", 1 * kDay}, 50);  // 850/1000 = 85%
+
+    const auto report = fixture.useCase().execute();
+
+    // "antigo" nao libera nada (o travado segura o arquivo): a cota segue ate d1.
+    ODS_CHECK(!fixture.isRetained("antigo") && !fixture.isRetained("d1"));
+    ODS_CHECK(fixture.volume->exists("/nvme/evt-y.mp4"));
+    ODS_CHECK(report.diskUsageAfter.usedBytes() == 800u);
+}
+
 int main() {
     test_deve_calcular_ocupacao_como_o_df_quando_houver_usado_e_disponivel();
     test_deve_lancar_excecao_quando_capacidade_reportada_for_zero();
@@ -500,6 +591,15 @@ int main() {
     test_nao_deve_expurgar_de_novo_quando_varredura_for_repetida();
     test_deve_lancar_disk_quota_exceeded_depois_de_expurgar_o_vencido_quando_so_restar_midia_travada();
     test_deve_reportar_falha_quando_log_de_expurgo_nao_puder_ser_gravado();
+
+    test_deve_vencer_pelo_prazo_novo_quando_politica_for_encurtada_depois_da_gravacao();
+    test_deve_honrar_expires_at_publicado_quando_politica_for_alongada_depois_da_gravacao();
+    test_deve_aplicar_prazo_de_snapshot_quando_tipo_gravado_for_snapshot_mesmo_em_mp4();
+    test_deve_calcular_expires_at_pelo_tipo_quando_clipe_nascer();
+    test_nao_deve_estar_disponivel_quando_expires_at_passar_mesmo_sem_varredura();
+    test_deve_traduzir_tipo_de_midia_para_o_nome_do_contrato();
+    test_deve_expurgar_os_dois_donos_quando_cota_precisar_do_arquivo_compartilhado();
+    test_nao_deve_contar_arquivo_preso_por_clipe_travado_quando_projetar_a_cota();
 
     std::cout << "test_s4_retention: all tests passed\n";
     return 0;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -11,6 +12,8 @@
 #include "s4/domain/repositories/media_clip_repository.hpp"
 #include "s4/domain/services/media_buffer_reader.hpp"
 #include "s4/domain/value_objects/capture_window.hpp"
+#include "s4/domain/value_objects/media_kind.hpp"
+#include "s4/domain/value_objects/retention_policy.hpp"
 #include "s4/domain/value_objects/time_window.hpp"
 
 namespace ods::s4::application {
@@ -62,8 +65,21 @@ public:
         const domain::CaptureWindow& window,
         const std::string& destinationPath,
         double waitTimeoutSeconds = 0.0,
-        const std::string& clipId = {}
+        const std::string& clipId = {},
+        domain::MediaKind mediaKind = domain::MediaKind::VideoClip
     );
+
+    // S4.3: todo clipe nasce com o expires_at desta politica (o mesmo que os
+    // handlers publicam em ods.s4.clip). Sem chamada, vale o padrao LGPD de 7 dias.
+    void setRetentionPolicy(domain::RetentionPolicy policy) { m_retention = policy; }
+
+    // Chamado depois que o clipe foi gravado e salvo no repositorio. O main
+    // liga aqui o PurgeDaemon::requestSweep(): um clipe novo pode ter acabado
+    // de passar o disco do gatilho de cota, e a varredura nao espera os 30 s.
+    // Uma falha no aviso nunca desfaz o clipe ja gravado.
+    void setOnClipSaved(std::function<void(const domain::MediaClip&)> callback) {
+        m_onClipSaved = std::move(callback);
+    }
 
     // Indica se o fluxo real esta disponivel (as duas portas injetadas).
     [[nodiscard]] bool supportsCaptureWindows() const noexcept {
@@ -80,6 +96,12 @@ private:
     std::shared_ptr<domain::IFileStorage> m_fileStorage;
     std::shared_ptr<ICaptureBufferReader> m_captureBuffer;
     std::shared_ptr<IMediaMuxer> m_muxer;
+    domain::RetentionPolicy m_retention{};
+    std::function<void(const domain::MediaClip&)> m_onClipSaved;
+
+    domain::MediaClip saveClip(const std::string& clipId, const std::string& eventId,
+                               const std::string& path, const std::string& sha256Hash,
+                               const domain::TimeWindow& window, domain::MediaKind kind);
 };
 
 } // namespace ods::s4::application

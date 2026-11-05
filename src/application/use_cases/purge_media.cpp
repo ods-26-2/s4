@@ -1,6 +1,7 @@
 #include "s4/application/use_cases/purge_media.hpp"
 
 #include <algorithm>
+#include <map>
 #include <optional>
 #include <utility>
 
@@ -65,13 +66,55 @@ PurgeReport PurgeMediaUseCase::execute() {
     return report;
 }
 
+// O tamanho de cada candidato e o que APAGA-LO libera, e nao o tamanho do
+// arquivo: dois clipes do mesmo event_id apontam para um arquivo so (o S4.2
+// nomeia pelo evento). Somar o arquivo para os dois faria a cota projetar o
+// dobro do que o disco ganha e parar de apagar cedo demais.
+//   * o arquivo pesa so no candidato MAIS NOVO que o referencia: na ordem FIFO
+//     ele e o ultimo a sair, e e quando ele sai que o arquivo some de fato;
+//   * se um clipe fora da lista (travado para auditoria) tambem o referencia,
+//     o arquivo nunca sera apagado nesta varredura e pesa 0 para todos.
 std::vector<domain::PurgeCandidate> PurgeMediaUseCase::loadCandidates() const {
     std::vector<domain::PurgeCandidate> candidates;
     for (auto& clip : m_repository->findPurgeCandidates()) {
-        const std::uintmax_t size = measuredSize(clip.filePath());
-        candidates.push_back(domain::PurgeCandidate{std::move(clip), size});
+        candidates.push_back(domain::PurgeCandidate{std::move(clip), 0});
     }
     return candidates;
+}
+
+// Refeito antes de cada estrategia: se a anterior expurgou o dono de um
+// arquivo compartilhado, o proximo clipe da fila passa a ser quem o libera.
+void PurgeMediaUseCase::attributeFileSizes(std::vector<domain::PurgeCandidate>& candidates) const {
+    std::map<std::string, std::size_t> newestByPath;
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        candidates[i].sizeBytes = 0;
+        const auto& clip = candidates[i].clip;
+        const auto known = newestByPath.find(clip.filePath());
+        if (known == newestByPath.end() ||
+            candidates[known->second].clip.createdAt() <= clip.createdAt()) {
+            newestByPath[clip.filePath()] = i;
+        }
+    }
+    for (const auto& [path, index] : newestByPath) {
+        if (!isFileHeldByClipOutside(candidates, candidates[index].clip)) {
+            candidates[index].sizeBytes = measuredSize(path);
+        }
+    }
+}
+
+bool PurgeMediaUseCase::isFileHeldByClipOutside(
+    const std::vector<domain::PurgeCandidate>& candidates,
+    const domain::MediaClip& clip
+) const {
+    for (const auto& sibling : m_repository->findByEventId(clip.eventId())) {
+        if (!sibling.isRetained() || sibling.filePath() != clip.filePath()) continue;
+        const bool isCandidate = std::any_of(candidates.begin(), candidates.end(),
+            [&sibling](const domain::PurgeCandidate& candidate) {
+                return candidate.clip.clipId() == sibling.clipId();
+            });
+        if (!isCandidate) return true;
+    }
+    return false;
 }
 
 // Arquivo ausente ou ilegivel pesa 0: a estrategia de cota nao conta com um
@@ -91,6 +134,7 @@ void PurgeMediaUseCase::applyStrategy(
     std::vector<domain::PurgeCandidate>& remaining,
     PurgeReport& report
 ) {
+    attributeFileSizes(remaining);
     const domain::RetentionContext context{m_clock->now(), m_diskUsage->currentUsage()};
     const std::vector<domain::PurgeCandidate> selected = strategy.selectClipsToPurge(remaining, context);
     for (const auto& candidate : selected) {
@@ -113,11 +157,14 @@ void PurgeMediaUseCase::purge(
         return;
     }
     try {
+        // Medido agora, e nao lido do candidato: o candidato pesa 0 quando
+        // divide o arquivo, mas se for ele quem o apaga, o log registra o real.
+        const std::uintmax_t sizeOnDisk = measuredSize(current->filePath());
         const domain::FileOutcome outcome = releaseFile(*current);
         domain::MediaClip purged = *current;
         purged.markAsPurged();
         m_repository->update(purged);
-        const std::uintmax_t bytesFreed = outcome == domain::FileOutcome::Deleted ? candidate.sizeBytes : 0;
+        const std::uintmax_t bytesFreed = outcome == domain::FileOutcome::Deleted ? sizeOnDisk : 0;
         const domain::PurgeLogEntry entry = make_entry(purged, reason, outcome, bytesFreed, context);
         report.purged.push_back(entry);
         recordInLog(entry, report);

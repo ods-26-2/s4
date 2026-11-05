@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -14,6 +15,11 @@ namespace ods::s4::infrastructure {
 namespace {
 
 using TimePoint = std::chrono::system_clock::time_point;
+
+#define S4_MEDIA_CLIP_COLUMNS \
+    " clip_id, event_id, file_path, sha256_hash, start_time_ms, end_time_ms," \
+    " is_retained, is_locked_for_audit, created_at_ms, points_of_interest," \
+    " media_type, expires_at_ms"
 
 std::int64_t to_epoch_ms(TimePoint tp) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(tp.time_since_epoch()).count();
@@ -77,6 +83,15 @@ domain::MediaClip clip_from_row(sqlite3_stmt* stmt) {
     const std::string rawPoints(
         reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9))
     );
+    std::optional<domain::MediaKind> mediaKind;
+    if (sqlite3_column_type(stmt, 10) != SQLITE_NULL) {
+        mediaKind = domain::media_kind_from_contract_name(
+            reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10)));
+    }
+    std::optional<TimePoint> expiresAt;
+    if (sqlite3_column_type(stmt, 11) != SQLITE_NULL) {
+        expiresAt = from_epoch_ms(sqlite3_column_int64(stmt, 11));
+    }
 
     return domain::MediaClip(
         clipId,
@@ -87,7 +102,9 @@ domain::MediaClip clip_from_row(sqlite3_stmt* stmt) {
         isRetained,
         isLockedForAudit,
         createdAt,
-        parse_points(rawPoints)
+        parse_points(rawPoints),
+        mediaKind,
+        expiresAt
     );
 }
 
@@ -101,9 +118,35 @@ void bind_clip(sqlite3_stmt* stmt, const domain::MediaClip& clip) {
         sqlite3_bind_int(stmt, 7, clip.isRetained() ? 1 : 0) != SQLITE_OK ||
         sqlite3_bind_int(stmt, 8, clip.isLockedForAudit() ? 1 : 0) != SQLITE_OK ||
         sqlite3_bind_int64(stmt, 9, to_epoch_ms(clip.createdAt())) != SQLITE_OK ||
-        sqlite3_bind_text(stmt, 10, serialize_points(clip.pointsOfInterest()).c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+        sqlite3_bind_text(stmt, 10, serialize_points(clip.pointsOfInterest()).c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 11, domain::to_contract_name(clip.mediaKind()), -1, SQLITE_STATIC) != SQLITE_OK ||
+        (clip.expiresAt().has_value()
+             ? sqlite3_bind_int64(stmt, 12, to_epoch_ms(*clip.expiresAt()))
+             : sqlite3_bind_null(stmt, 12)) != SQLITE_OK) {
         throw domain::SqliteStorageError("failed to bind media clip parameters");
     }
+}
+
+void exec_or_throw(sqlite3* db, const char* sql, const std::string& what) {
+    char* errorMessage = nullptr;
+    if (sqlite3_exec(db, sql, nullptr, nullptr, &errorMessage) != SQLITE_OK) {
+        const std::string message = errorMessage != nullptr ? errorMessage : sqlite3_errmsg(db);
+        sqlite3_free(errorMessage);
+        throw domain::SqliteStorageError(what + ": " + message);
+    }
+}
+
+bool has_column(sqlite3* db, const std::string& column) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, "PRAGMA table_info(media_clips);", -1, &stmt, nullptr) != SQLITE_OK) {
+        throw domain::SqliteStorageError(sqlite3_errmsg(db));
+    }
+    bool found = false;
+    for (int rc = sqlite3_step(stmt); rc == SQLITE_ROW && !found; rc = sqlite3_step(stmt)) {
+        found = column == reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+    }
+    sqlite3_finalize(stmt);
+    return found;
 }
 
 void run_mutation(sqlite3* db, sqlite3_stmt* stmt) {
@@ -149,23 +192,47 @@ void SQLiteMediaClipRepository::initSchema() {
         "  is_retained INTEGER NOT NULL,"
         "  is_locked_for_audit INTEGER NOT NULL,"
         "  created_at_ms INTEGER NOT NULL,"
-        "  points_of_interest TEXT NOT NULL DEFAULT ''"
+        "  points_of_interest TEXT NOT NULL DEFAULT '',"
+        "  media_type TEXT,"
+        "  expires_at_ms INTEGER"
         ");";
+    exec_or_throw(m_db, kSchema, "failed to init schema");
+    migrateSchema();
+}
 
-    char* errorMessage = nullptr;
-    if (sqlite3_exec(m_db, kSchema, nullptr, nullptr, &errorMessage) != SQLITE_OK) {
-        const std::string message = errorMessage != nullptr ? errorMessage : sqlite3_errmsg(m_db);
-        sqlite3_free(errorMessage);
-        throw domain::SqliteStorageError("failed to init schema: " + message);
+// Bancos gravados antes do S4.3 completo nao tem media_type nem expires_at_ms.
+// ALTER TABLE ADD COLUMN preserva as linhas; o preenchimento usa o mesmo
+// palpite do dominio (extensao do arquivo) e o prazo LGPD padrao de 7 dias
+// contado de created_at. O vencimento efetivo ainda passa pela politica em
+// vigor (RetentionPolicy::expiryOf), entao um prazo menor configurado hoje
+// continua valendo para essas linhas.
+void SQLiteMediaClipRepository::migrateSchema() {
+    if (!has_column(m_db, "media_type")) {
+        exec_or_throw(m_db, "ALTER TABLE media_clips ADD COLUMN media_type TEXT;",
+                      "failed to add media_type");
     }
+    if (!has_column(m_db, "expires_at_ms")) {
+        exec_or_throw(m_db, "ALTER TABLE media_clips ADD COLUMN expires_at_ms INTEGER;",
+                      "failed to add expires_at_ms");
+    }
+    exec_or_throw(m_db,
+        "UPDATE media_clips SET media_type = CASE"
+        "  WHEN lower(file_path) LIKE '%.jpg' OR lower(file_path) LIKE '%.jpeg'"
+        "    OR lower(file_path) LIKE '%.png' THEN 'SNAPSHOT' ELSE 'CLIP' END"
+        " WHERE media_type IS NULL;"
+        "UPDATE media_clips SET expires_at_ms = created_at_ms + 604800000"
+        " WHERE expires_at_ms IS NULL;"
+        "CREATE INDEX IF NOT EXISTS idx_media_clips_event_id ON media_clips(event_id);",
+        "failed to backfill media_clips");
 }
 
 void SQLiteMediaClipRepository::save(const domain::MediaClip& clip) {
     constexpr const char* kSql =
         "INSERT OR REPLACE INTO media_clips ("
         " clip_id, event_id, file_path, sha256_hash, start_time_ms, end_time_ms,"
-        " is_retained, is_locked_for_audit, created_at_ms, points_of_interest"
-        ") VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);";
+        " is_retained, is_locked_for_audit, created_at_ms, points_of_interest,"
+        " media_type, expires_at_ms"
+        ") VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12);";
 
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -177,8 +244,7 @@ void SQLiteMediaClipRepository::save(const domain::MediaClip& clip) {
 
 std::optional<domain::MediaClip> SQLiteMediaClipRepository::findById(const std::string& clipId) {
     constexpr const char* kSql =
-        "SELECT clip_id, event_id, file_path, sha256_hash, start_time_ms, end_time_ms,"
-        "       is_retained, is_locked_for_audit, created_at_ms, points_of_interest"
+        "SELECT " S4_MEDIA_CLIP_COLUMNS
         " FROM media_clips WHERE clip_id = ?1 LIMIT 1;";
 
     sqlite3_stmt* stmt = nullptr;
@@ -201,8 +267,7 @@ std::optional<domain::MediaClip> SQLiteMediaClipRepository::findById(const std::
 
 std::vector<domain::MediaClip> SQLiteMediaClipRepository::findByEventId(const std::string& eventId) {
     constexpr const char* kSql =
-        "SELECT clip_id, event_id, file_path, sha256_hash, start_time_ms, end_time_ms,"
-        "       is_retained, is_locked_for_audit, created_at_ms, points_of_interest"
+        "SELECT " S4_MEDIA_CLIP_COLUMNS
         " FROM media_clips WHERE event_id = ?1;";
 
     sqlite3_stmt* stmt = nullptr;
@@ -221,8 +286,7 @@ std::vector<domain::MediaClip> SQLiteMediaClipRepository::findByEventId(const st
 
 std::vector<domain::MediaClip> SQLiteMediaClipRepository::findPurgeCandidates() {
     constexpr const char* kSql =
-        "SELECT clip_id, event_id, file_path, sha256_hash, start_time_ms, end_time_ms,"
-        "       is_retained, is_locked_for_audit, created_at_ms, points_of_interest"
+        "SELECT " S4_MEDIA_CLIP_COLUMNS
         " FROM media_clips WHERE is_retained = 1 AND is_locked_for_audit = 0"
         " ORDER BY created_at_ms ASC;";
 
