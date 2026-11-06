@@ -1,0 +1,19 @@
+# Somente para a apresentacao: prazo de expurgo de 3 min em vez de 7 dias.
+# O Docker Compose le este arquivo sozinho, junto com o docker-compose.yml.
+# Para voltar ao normal (7 dias): apague este arquivo e rode docker compose up -d.
+services:
+  s4-media-evidence:
+    command:
+      - /app/s4_media_evidence
+      - --port
+      - "18084"
+      - --db
+      - /data/s4.db
+      - --media-dir
+      - /data/media
+      - --retention-days
+      - "0.0021"
+      - --sweep-interval
+      - "5"
+      - --disk-check-interval
+      - "5"
