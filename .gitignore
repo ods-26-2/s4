@@ -20,3 +20,6 @@ out/
 # Local build/test artifacts
 build-wsl/
 docker-data/
+
+# Ambiente local (nao versionar)
+.env

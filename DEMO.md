@@ -1,6 +1,6 @@
 # Demo do S4 na Jetson
 
-Kafka: `172.18.4.56:9092` (somente rede interna do Dcomp).
+Kafka: `200.17.66.56:9093`.
 API: `http://127.0.0.1:18084` na própria Jetson (ou `http://<IP_DA_JETSON>:18084`).
 Pré-requisitos: `docker compose`, `curl`, `jq` e, para o teste Kafka, `kcat`.
 
@@ -18,7 +18,7 @@ Edite o `.env`:
 ODS_S4_DATA_DIR=/mnt/nvme/s4
 
 # Kafka
-ODS_S4_KAFKA_BROKERS=172.18.4.56:9092
+ODS_S4_KAFKA_BROKERS=200.17.66.56:9093
 
 # P4 ao vivo (escolha UMA fonte)
 ODS_S4_P4_SHM=/ipc/ods_p4_cam0
@@ -43,7 +43,7 @@ docker compose ps
 docker compose logs | grep "Kafka/B3 bus enabled"
 ```
 
-Deve aparecer: `Kafka/B3 bus enabled: 172.18.4.56:9092`.
+Deve aparecer: `Kafka/B3 bus enabled: 200.17.66.56:9093`.
 
 ## 3. Saúde e buffer
 
@@ -102,7 +102,7 @@ Em outro terminal, se o `kcat` estiver instalado, publique um evento do S2
 (use com o P4 ao vivo; o replay não serve para este teste):
 
 ```bash
-kcat -b 172.18.4.56:9092 -P -t ods.s2.event <<'JSON'
+kcat -b 200.17.66.56:9093 -P -t ods.s2.event <<'JSON'
 {
   "message_type": "event",
   "message_id": "11111111-1111-4111-8111-111111111111",
@@ -126,7 +126,7 @@ JSON
 Veja o descritor publicado pelo S4:
 
 ```bash
-kcat -b 172.18.4.56:9092 -C -t ods.s4.clip -o -1
+kcat -b 200.17.66.56:9093 -C -t ods.s4.clip -o -1
 ```
 
 O consumidor fica aguardando; use `Ctrl+C` para sair.

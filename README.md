@@ -216,8 +216,8 @@ Resumo; o detalhamento está em [`docs/S4.3-retencao-expurgo.md`](docs/S4.3-rete
   - `sqlite3` (persistência de metadados)
   - `OpenSSL` (cálculo de hash SHA-256)
   - `librdkafka` (opcional; integração com o barramento B3). O broker padrão é
-    o da Jetson (`172.18.4.56:9092`), acessível somente pela rede interna do
-    Dcomp; endereço e credenciais podem ser sobrescritos via `ODS_S4_KAFKA_*`.
+    `200.17.66.56:9093`; endereço e credenciais podem ser sobrescritos via
+    `ODS_S4_KAFKA_*`.
     Com `--kafka-disabled` o serviço sobe sem barramento e atende apenas a API
     HTTP.
   - `GStreamer 1.0` (replay de vídeo, demux, parse H.264 e mux para MP4).
@@ -350,12 +350,11 @@ A API envia CORS (`Access-Control-Allow-Origin`, configurável por
 ### Barramento B3 (Kafka)
 
 O S4 consome `ods.s2.event`, `ods.session.started`, `ods.s4.capture.command` e
-`ods.s4.clip.query`, e publica `ods.s4.clip`/replies. O broker padrão é o da
-Jetson (`172.18.4.56:9092`), acessível somente pela rede interna do Dcomp e
-sobrescrito via ambiente quando necessário:
+`ods.s4.clip.query`, e publica `ods.s4.clip`/replies. O broker padrão é
+`200.17.66.56:9093`, sobrescrito via ambiente quando necessário:
 
 ```bash
-ODS_S4_KAFKA_BROKERS=172.18.4.56:9092 ODS_S4_KAFKA_GROUP_ID=s4-media-evidence \
+ODS_S4_KAFKA_BROKERS=200.17.66.56:9093 ODS_S4_KAFKA_GROUP_ID=s4-media-evidence \
   ./build/s4_media_evidence --port 18084 --db /tmp/s4.db --media-dir /tmp/s4-media
 ```
 
@@ -390,8 +389,8 @@ execução e o binário, rodando como usuário não-root `s4` com `VOLUME /data`
 
 Na Sprint 3 o alvo é a **Jetson (ARM64)**, sem nuvem. O `docker-compose.yml`
 monta `/data` no NVMe real (`ODS_S4_DATA_DIR`), usa `network_mode: host` para
-alcançar o Kafka interno (`172.18.4.56:9092`) sem conflito com a sub-rede
-`172.18.0.0/16` do Docker, e lê a fonte de captura de `ODS_S4_P4_SHM` ou
+alcançar o Kafka externo (`200.17.66.56:9093`) sem NAT, e lê a fonte de captura
+de `ODS_S4_P4_SHM` ou
 `ODS_S4_SOURCE`; veja `.env.example`, o
 [`docs/PLANO_SPRINT3_JETSON.md`](docs/PLANO_SPRINT3_JETSON.md) e o
 [`DEMO.md`](DEMO.md). Com `--kafka-disabled`, o serviço sobe e atende apenas a
@@ -462,7 +461,7 @@ docker build -t ods/s4-media-evidence:0.1.0 ./mod2/s4-media-evidence
 docker run -d --rm --name s4 --network host \
   -v /mnt/nvme/s4:/data \
   -v "${ODS_S4_IPC_DIR:-/tmp}:/ipc" \
-  -e ODS_S4_KAFKA_BROKERS="${ODS_S4_KAFKA_BROKERS:-172.18.4.56:9092}" \
+  -e ODS_S4_KAFKA_BROKERS="${ODS_S4_KAFKA_BROKERS:-200.17.66.56:9093}" \
   -e ODS_S4_P4_SHM="${ODS_S4_P4_SHM:-}" \
   ods/s4-media-evidence:0.1.0
 curl http://<IP_DA_JETSON>:18084/healthz           # {"status": "ok"}

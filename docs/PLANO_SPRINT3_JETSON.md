@@ -36,7 +36,7 @@ conformidade LGPD.
 | :--- | :--- | :--- |
 | Armazenamento | NVMe local via `FileStorage` | Simplicidade operacional na borda; retenção LGPD já implementada |
 | Volume | Bind mount `${ODS_S4_DATA_DIR}:/data` | `statvfs` mede o NVMe real (cota FIFO de 85% do S4.3) |
-| Kafka | Broker da Jetson `172.18.4.56:9092`, sobrescrito por `ODS_S4_KAFKA_*` ou flags | Broker operado pela equipe de integração, restrito à rede do Dcomp |
+| Kafka | Broker `200.17.66.56:9093`, sobrescrito por `ODS_S4_KAFKA_*` ou flags | Broker operado pela equipe de integração |
 | Sem broker | `--kafka-disabled`: S4 sobe e atende somente HTTP | Critério: software rodando mesmo com provedor indisponível |
 | Deploy | Docker Compose arm64 nativo na Jetson, com `network_mode: host` | Evita NAT e conflito com a sub-rede `172.18.0.0/16` do Docker |
 | Demonstração | Pelo IP da Jetson, nunca `localhost` | Critério explícito da Sprint 3 |
@@ -57,7 +57,7 @@ volume NVMe que hospeda as mídias.
 
 | Variável | Uso |
 | :--- | :--- |
-| `ODS_S4_KAFKA_BROKERS` | Lista de brokers (`host:porta,...`). Padrão: `172.18.4.56:9092`. |
+| `ODS_S4_KAFKA_BROKERS` | Lista de brokers (`host:porta,...`). Padrão: `200.17.66.56:9093`. |
 | `ODS_S4_KAFKA_GROUP_ID` | `group.id` do consumidor (padrão `s4-media-evidence`). |
 | `ODS_S4_KAFKA_CLIENT_ID` | `client.id` (padrão `s4`). |
 | `ODS_S4_KAFKA_SECURITY_PROTOCOL` | Opcional, ex.: `SASL_SSL`. |
@@ -99,7 +99,7 @@ Tópicos já tratados pelo S4:
 | J4 | Compose com bind mount NVMe e `.env.example` | Concluído |
 | J5 | Testes unitários da configuração do Kafka | Concluído |
 | J6 | Build ARM64 e execução na Jetson | Em validação (broker entregue em 05/11/2026) |
-| J7 | E2E com broker real da equipe de integração | Broker disponível em `172.18.4.56:9092`; validar na Jetson |
+| J7 | E2E com broker real da equipe de integração | Broker disponível em `200.17.66.56:9093`; validar na Jetson |
 | J8 | Homologação das interfaces pela TRA-2 | Aguardando integração |
 
 ## 6. Cronograma

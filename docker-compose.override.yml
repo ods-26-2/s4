@@ -11,6 +11,8 @@ services:
       - /data/s4.db
       - --media-dir
       - /data/media
+      - --source
+      - /app/video_test/10 Minutes of Amazon Rainforest (Free Download).mp4
       - --retention-days
       - "0.0021"
       - --sweep-interval
