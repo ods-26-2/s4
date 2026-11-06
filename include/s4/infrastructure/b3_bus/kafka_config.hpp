@@ -4,11 +4,12 @@
 
 namespace ods::s4::infrastructure {
 
-// Configuracao do transporte Kafka. O broker padrao e o endereco historico do
-// guia; quem opera o barramento pode sobrescreve-lo por ambiente ou flag.
-// Para operar sem barramento use --kafka-disabled.
+// Configuracao do transporte Kafka. O broker padrao e o da Jetson, acessivel
+// somente pela rede interna do Dcomp; quem opera o barramento pode
+// sobrescreve-lo por ambiente ou flag. Para operar sem barramento use
+// --kafka-disabled.
 struct KafkaEventTransportConfig {
-    std::string brokers = "34.66.235.91:9093";
+    std::string brokers = "172.18.4.56:9092";
     std::string groupId = "s4-media-evidence";
     std::string clientId = "s4";
     std::string securityProtocol;

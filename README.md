@@ -25,7 +25,7 @@ mod2/s4-media-evidence/
 ├── CMakeLists.txt              # Configuração de build C++20 e dependências
 ├── README.md                   # Documentação do componente
 ├── Dockerfile                  # Imagem OCI multi-arch (builder + runtime)
-├── docker-compose.yml          # Orquestração local (porta 8080 + volume)
+├── docker-compose.yml          # Orquestração local (porta 18084 + volume)
 ├── .dockerignore               # Exclusões do contexto de build
 ├── third_party/httplib/        # cpp-httplib vendido (HTTP server)
 ├── include/s4/                 # Headers públicos da biblioteca
@@ -216,9 +216,10 @@ Resumo; o detalhamento está em [`docs/S4.3-retencao-expurgo.md`](docs/S4.3-rete
   - `sqlite3` (persistência de metadados)
   - `OpenSSL` (cálculo de hash SHA-256)
   - `librdkafka` (opcional; integração com o barramento B3). O broker padrão é
-    o endereço histórico do guia (`34.66.235.91:9093`); endereço e credenciais
-    podem ser sobrescritos pela equipe de integração via `ODS_S4_KAFKA_*`. Com
-    `--kafka-disabled` o serviço sobe sem barramento e atende apenas a API HTTP.
+    o da Jetson (`172.18.4.56:9092`), acessível somente pela rede interna do
+    Dcomp; endereço e credenciais podem ser sobrescritos via `ODS_S4_KAFKA_*`.
+    Com `--kafka-disabled` o serviço sobe sem barramento e atende apenas a API
+    HTTP.
   - `GStreamer 1.0` (replay de vídeo, demux, parse H.264 e mux para MP4).
     Em Debian/Ubuntu os pacotes necessários são `gstreamer1.0-dev`,
     `libgstreamer-plugins-base1.0-dev` (é ele que traz o `gstreamer-app-1.0.pc`),
@@ -255,7 +256,7 @@ ctest --output-on-failure
 ### Executando o Serviço (daemon demo)
 
 ```bash
-./build/s4_media_evidence --port 8080 --db /tmp/s4.db --media-dir /tmp/s4-media
+./build/s4_media_evidence --port 18084 --db /tmp/s4.db --media-dir /tmp/s4-media
 ```
 
 Sem `--source`, o ring buffer real do S4.1 em `/dev/shm/ods_s4_ring_<camera>` é alimentado por uma fonte
@@ -267,12 +268,12 @@ que comprova o fluxo completo:
 ```bash
 ./build/s4_media_evidence \
   --source "video_test/10 Minutes of Amazon Rainforest (Free Download).mp4" \
-  --scenario --port 8080 --db /tmp/s4.db --media-dir /tmp/s4-media
+  --scenario --port 18084 --db /tmp/s4.db --media-dir /tmp/s4-media
 ```
 
 | Flag | Padrão | Para quê |
 |---|---|---|
-| `--port N` | `8080` | Porta HTTP; `0` deixa o sistema escolher (o daemon imprime a escolhida). |
+| `--port N` | `18084` | Porta HTTP; `0` deixa o sistema escolher (o daemon imprime a escolhida). |
 | `--db PATH` | `/tmp/s4_media_evidence.db` | Banco SQLite dos descritores. |
 | `--media-dir PATH` | `/tmp/s4_media_evidence` | Onde os clipes são gravados. |
 | `--source FILE` | — | Replay de um MP4 H.264 existente, em vez da fonte sintética. |
@@ -284,7 +285,7 @@ que comprova o fluxo completo:
 O daemon inicia o ring buffer e expõe a API:
 
 ```bash
-curl http://localhost:8080/api/v1/clips/<clip_id>
+curl http://localhost:18084/api/v1/clips/<clip_id>
 sha256sum /tmp/s4-media/event-demo.mp4   # deve bater com "sha256_hash" do JSON
 ls -lh /dev/shm/ods_s4_ring_cam0         # o buffer circular, enquanto o daemon roda
 ```
@@ -303,12 +304,12 @@ Para injetar um evento em runtime (sem reiniciar o daemon), use `POST /api/v1/ev
 clipe do buffer, persiste em `$media_dir/<event_id>.mp4` e responde `201` com o DTO do clipe:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/api/v1/events \
+curl -X POST http://127.0.0.1:18084/api/v1/events \
   -H 'Content-Type: application/json' \
   -d '{"event_id": "evt-2026-0001"}'
 
 # janela explícita em epoch milliseconds (opcional; default = últimos 1s)
-curl -X POST http://127.0.0.1:8080/api/v1/events \
+curl -X POST http://127.0.0.1:18084/api/v1/events \
   -H 'Content-Type: application/json' \
   -d '{"event_id": "evt-2026-0002", "start_ms": 1720000000000, "end_ms": 1720000001000}'
 ```
@@ -317,9 +318,9 @@ curl -X POST http://127.0.0.1:8080/api/v1/events \
 o buffer realmente guarda:
 
 ```bash
-TS=$(curl -s http://127.0.0.1:8080/api/v1/buffer/stats | jq -r .newest_capture_ts_ns)
+TS=$(curl -s http://127.0.0.1:18084/api/v1/buffer/stats | jq -r .newest_capture_ts_ns)
 
-curl -X POST http://127.0.0.1:8080/api/v1/events \
+curl -X POST http://127.0.0.1:18084/api/v1/events \
   -H 'Content-Type: application/json' \
   -d "{\"event_id\":\"evt-2026-0003\",\"capture_ts_ns\":$TS,\"pre_window_seconds\":1.0,\"post_window_seconds\":0.5}"
 ```
@@ -331,7 +332,7 @@ O estado atual do ring buffer, incluindo o intervalo do relógio de captura, fic
 `GET /api/v1/buffer/stats` — é o que permite escolher um `capture_ts_ns` válido:
 
 ```bash
-curl -s http://127.0.0.1:8080/api/v1/buffer/stats | jq
+curl -s http://127.0.0.1:18084/api/v1/buffer/stats | jq
 ```
 
 | Rota | Para quê |
@@ -340,17 +341,22 @@ curl -s http://127.0.0.1:8080/api/v1/buffer/stats | jq
 | `GET /api/v1/buffer/stats` | Quadros guardados, bytes, taxa de uso, sessão e intervalo do relógio de captura. |
 | `POST /api/v1/events` | Dispara um evento e extrai o clipe; responde `201` com o DTO. |
 | `GET /api/v1/clips/{id}` | Descritor do clipe, incluindo o SHA-256. |
+| `GET /api/v1/clips/{id}/media` | Baixa o MP4 do clipe; `410 CLIP_EXPIRED` depois do prazo. |
+
+A API envia CORS (`Access-Control-Allow-Origin`, configurável por
+`ODS_S4_CORS_ORIGIN`, padrão `*` na rede interna) e responde ao preflight
+`OPTIONS` das rotas `/api/v1/*`.
 
 ### Barramento B3 (Kafka)
 
 O S4 consome `ods.s2.event`, `ods.session.started`, `ods.s4.capture.command` e
-`ods.s4.clip.query`, e publica `ods.s4.clip`/replies. O broker padrão é o
-endereço histórico do guia (`34.66.235.91:9093`), sobrescrito pela equipe de
-integração quando necessário:
+`ods.s4.clip.query`, e publica `ods.s4.clip`/replies. O broker padrão é o da
+Jetson (`172.18.4.56:9092`), acessível somente pela rede interna do Dcomp e
+sobrescrito via ambiente quando necessário:
 
 ```bash
-ODS_S4_KAFKA_BROKERS=broker:9092 ODS_S4_KAFKA_GROUP_ID=s4-media-evidence \
-  ./build/s4_media_evidence --port 8080 --db /tmp/s4.db --media-dir /tmp/s4-media
+ODS_S4_KAFKA_BROKERS=172.18.4.56:9092 ODS_S4_KAFKA_GROUP_ID=s4-media-evidence \
+  ./build/s4_media_evidence --port 18084 --db /tmp/s4.db --media-dir /tmp/s4-media
 ```
 
 Também é possível usar `--kafka-brokers`, `--kafka-group-id` e
@@ -362,7 +368,7 @@ Com `--kafka-disabled`, o S4 sobe sem barramento e atende apenas a API HTTP —
 o software continua demonstrável mesmo se o Kafka não estiver disponível.
 
 > **Demonstração na Jetson:** acesse pelo IP da placa (ex.:
-> `http://<IP_DA_JETSON>:8080/...`), nunca por `localhost`. O serviço escuta em
+> `http://<IP_DA_JETSON>:18084/...`), nunca por `localhost`. O serviço escuta em
 > `0.0.0.0`.
 
 > **Nota de build:** o modo `Release` define `NDEBUG` e remove todos os `assert()`. Os testes do S4.1 usam
@@ -383,10 +389,13 @@ Imagem OCI **multi-arch** (`debian:bookworm-slim`, multi-stage): o estágio `bui
 execução e o binário, rodando como usuário não-root `s4` com `VOLUME /data`.
 
 Na Sprint 3 o alvo é a **Jetson (ARM64)**, sem nuvem. O `docker-compose.yml`
-monta `/data` no NVMe real (`ODS_S4_DATA_DIR`) e usa o broker Kafka padrão do
-guia, sobrescrito por `ODS_S4_KAFKA_*`; veja `.env.example` e o
-[`docs/PLANO_SPRINT3_JETSON.md`](docs/PLANO_SPRINT3_JETSON.md). Com
-`--kafka-disabled`, o serviço sobe e atende apenas a API HTTP.
+monta `/data` no NVMe real (`ODS_S4_DATA_DIR`), usa `network_mode: host` para
+alcançar o Kafka interno (`172.18.4.56:9092`) sem conflito com a sub-rede
+`172.18.0.0/16` do Docker, e lê a fonte de captura de `ODS_S4_P4_SHM` ou
+`ODS_S4_SOURCE`; veja `.env.example`, o
+[`docs/PLANO_SPRINT3_JETSON.md`](docs/PLANO_SPRINT3_JETSON.md) e o
+[`DEMO.md`](DEMO.md). Com `--kafka-disabled`, o serviço sobe e atende apenas a
+API HTTP.
 # Guia de Desenvolvimento e Execução - Kit B6 (Módulo MOD-2)
 
 Este repositório contém a implementação dos submódulos de interface **B6.1 (OverlayPlayer)** e **B6.2 (ZoneEditor)**, responsáveis pela renderização gráfica acelerada e edição topológica vetorial do ecossistema ODS.
@@ -449,14 +458,16 @@ Para correr os testes de **ambos os módulos simultaneamente**, execute:
 # Build (testes rodam dentro do builder)
 docker build -t ods/s4-media-evidence:0.1.0 ./mod2/s4-media-evidence
 
-# Executar (dados persistidos no NVMe/bind mount e Kafka opcional)
-docker run -d --rm --name s4 -p 8080:8080 \
+# Executar (dados no NVMe, rede da Jetson e Kafka opcional)
+docker run -d --rm --name s4 --network host \
   -v /mnt/nvme/s4:/data \
-  -e ODS_S4_KAFKA_BROKERS="${ODS_S4_KAFKA_BROKERS:-}" \
+  -v "${ODS_S4_IPC_DIR:-/tmp}:/ipc" \
+  -e ODS_S4_KAFKA_BROKERS="${ODS_S4_KAFKA_BROKERS:-172.18.4.56:9092}" \
+  -e ODS_S4_P4_SHM="${ODS_S4_P4_SHM:-}" \
   ods/s4-media-evidence:0.1.0
-curl http://<IP_DA_JETSON>:8080/healthz           # {"status": "ok"}
+curl http://<IP_DA_JETSON>:18084/healthz           # {"status": "ok"}
 
-# Ou via docker compose (healthcheck + porta + bind mount NVMe)
+# Ou via docker compose (host networking + healthcheck + bind mount NVMe)
 docker compose up -d --build
 ```
 

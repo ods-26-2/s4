@@ -36,9 +36,9 @@ conformidade LGPD.
 | :--- | :--- | :--- |
 | Armazenamento | NVMe local via `FileStorage` | Simplicidade operacional na borda; retenção LGPD já implementada |
 | Volume | Bind mount `${ODS_S4_DATA_DIR}:/data` | `statvfs` mede o NVMe real (cota FIFO de 85% do S4.3) |
-| Kafka | Padrão do guia, sobrescrito por `ODS_S4_KAFKA_*` ou flags | Broker é operado pela equipe de integração |
+| Kafka | Broker da Jetson `172.18.4.56:9092`, sobrescrito por `ODS_S4_KAFKA_*` ou flags | Broker operado pela equipe de integração, restrito à rede do Dcomp |
 | Sem broker | `--kafka-disabled`: S4 sobe e atende somente HTTP | Critério: software rodando mesmo com provedor indisponível |
-| Deploy | Docker Compose arm64 nativo na Jetson | Mantém a containerização já validada |
+| Deploy | Docker Compose arm64 nativo na Jetson, com `network_mode: host` | Evita NAT e conflito com a sub-rede `172.18.0.0/16` do Docker |
 | Demonstração | Pelo IP da Jetson, nunca `localhost` | Critério explícito da Sprint 3 |
 | Segurança | Credenciais só em env/.env (fora do git); sem log de segredo | Service account/tokens não pertencem ao repositório |
 
@@ -57,7 +57,7 @@ volume NVMe que hospeda as mídias.
 
 | Variável | Uso |
 | :--- | :--- |
-| `ODS_S4_KAFKA_BROKERS` | Lista de brokers (`host:porta,...`). Padrão: `34.66.235.91:9093`. |
+| `ODS_S4_KAFKA_BROKERS` | Lista de brokers (`host:porta,...`). Padrão: `172.18.4.56:9092`. |
 | `ODS_S4_KAFKA_GROUP_ID` | `group.id` do consumidor (padrão `s4-media-evidence`). |
 | `ODS_S4_KAFKA_CLIENT_ID` | `client.id` (padrão `s4`). |
 | `ODS_S4_KAFKA_SECURITY_PROTOCOL` | Opcional, ex.: `SASL_SSL`. |
@@ -68,6 +68,20 @@ volume NVMe que hospeda as mídias.
 
 As flags `--kafka-brokers`, `--kafka-group-id` e `--kafka-client-id` têm
 precedência sobre o ambiente. `--kafka-disabled` força a operação sem Kafka.
+
+A fonte de vídeo também vem do ambiente (as flags têm precedência):
+
+| Variável | Uso |
+| :--- | :--- |
+| `ODS_S4_P4_SHM` | Socket `shmsink` com NV12 cru do P4 (ex.: `/ipc/ods_p4_cam0`). Use **uma** entre esta e `ODS_S4_SOURCE`. |
+| `ODS_S4_SOURCE` | Replay de um MP4 local (demo). |
+| `ODS_S4_WIDTH` / `ODS_S4_HEIGHT` / `ODS_S4_FPS` | Formato combinado com o P4 (padrão `1280x720@30`). |
+| `ODS_S4_IPC_DIR` | Diretório da Jetson montado em `/ipc` para o socket do P4. |
+| `ODS_S4_CORS_ORIGIN` | Origem permitida pela API HTTP (padrão `*`, rede interna). |
+
+Com `network_mode: host`, a API responde em `http://<IP_DA_JETSON>:18084` sem
+mapeamento de portas; o socket do P4 continua sendo um caminho de filesystem e
+precisa do bind mount acima.
 
 Tópicos já tratados pelo S4:
 
@@ -84,8 +98,8 @@ Tópicos já tratados pelo S4:
 | J3 | Repasse opcional de SASL/TLS sem logar segredos | Concluído |
 | J4 | Compose com bind mount NVMe e `.env.example` | Concluído |
 | J5 | Testes unitários da configuração do Kafka | Concluído |
-| J6 | Build ARM64 e execução na Jetson | Aguardando acesso à placa/IP |
-| J7 | E2E com broker real da equipe de integração | Aguardando broker da TRA-1 |
+| J6 | Build ARM64 e execução na Jetson | Em validação (broker entregue em 05/11/2026) |
+| J7 | E2E com broker real da equipe de integração | Broker disponível em `172.18.4.56:9092`; validar na Jetson |
 | J8 | Homologação das interfaces pela TRA-2 | Aguardando integração |
 
 ## 6. Cronograma
@@ -117,10 +131,10 @@ instalada no host; na imagem Docker (Jetson) eles são exigidos pelo build.
 cp .env.example .env        # preencher ODS_S4_DATA_DIR e broker da TRA-1
 docker compose build
 docker compose up -d
-curl http://<IP_DA_JETSON>:8080/healthz
-curl -X POST http://<IP_DA_JETSON>:8080/api/v1/events \
+curl http://<IP_DA_JETSON>:18084/healthz
+curl -X POST http://<IP_DA_JETSON>:18084/api/v1/events \
   -H 'Content-Type: application/json' -d '{"event_id":"evt-demo"}'
-curl http://<IP_DA_JETSON>:8080/api/v1/clips/<clip_id>
+curl http://<IP_DA_JETSON>:18084/api/v1/clips/<clip_id>
 sha256sum "$ODS_S4_DATA_DIR"/media/evt-demo.mp4
 ```
 

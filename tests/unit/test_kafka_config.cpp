@@ -29,7 +29,7 @@ void test_deve_usar_broker_padrao_quando_nao_ha_ambiente() {
     clear_kafka_environment();
     const auto config = kafka_config_from_env();
     ODS_CHECK(config.enabled());
-    ODS_CHECK(config.brokers == "34.66.235.91:9093");
+    ODS_CHECK(config.brokers == "172.18.4.56:9092");
     ODS_CHECK(config.groupId == "s4-media-evidence");
     ODS_CHECK(config.clientId == "s4");
 }

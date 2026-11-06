@@ -32,6 +32,7 @@
 #include <chrono>
 #include <cstdint>
 #include <csignal>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -71,6 +72,8 @@ void print_usage(const char* program) {
                  "                    codificado pelo x264enc; captured_at e sessao oficiais\n"
                  "  --p4-shm SOCKET   S4.1/6c: NV12 cru de P4 via shmsink, codificado pelo\n"
                  "                    x264enc; sem metadados, a sessao vem do marcador\n"
+                 "  Fonte de video tambem por ambiente (flags tem precedencia):\n"
+                 "    ODS_S4_SOURCE, ODS_S4_P4_SHM, ODS_S4_WIDTH, ODS_S4_HEIGHT, ODS_S4_FPS\n"
                  "  --width/--height/--fps  formato combinado com P4 (padrao: 1280x720@30)\n"
                  "  --encoder-preset NAME  ultrafast|superfast|veryfast|faster|fast (padrao: ultrafast)\n"
                  "  --encoder-bitrate BPS  bitrate do x264enc; dimensiona o buffer nos\n"
@@ -367,7 +370,7 @@ void run_demo_scenario(
 
 
 int main(int argc, char* argv[]) {
-    int port = 8080;
+    int port = 18084;
     std::string dbPath = "/tmp/s4_media_evidence.db";
     std::string mediaDir = "/tmp/s4_media_evidence";
     // S4.1/S4.4 — captura e replay.
@@ -382,6 +385,43 @@ int main(int argc, char* argv[]) {
     bool kafkaDisabled = false;
     // S4.3 — expurgo.
     RetentionOptions retentionOptions;
+
+    // Fonte de captura tambem por ambiente: o compose da Jetson nao consegue
+    // escolher flags condicionalmente, mas consegue definir ODS_S4_*.
+    const auto read_env = [](const char* name) -> std::string {
+        const char* value = std::getenv(name);
+        return value == nullptr ? std::string{} : std::string{value};
+    };
+    const std::string envSource = read_env("ODS_S4_SOURCE");
+    const std::string envP4Shm = read_env("ODS_S4_P4_SHM");
+    if (!envSource.empty() && !envP4Shm.empty()) {
+        std::cerr << "define only ODS_S4_SOURCE or ODS_S4_P4_SHM, not both\n";
+        return 1;
+    }
+    try {
+        if (!envSource.empty()) {
+            capture.input = CaptureInput::FileReplay;
+            capture.sourcePath = envSource;
+        } else if (!envP4Shm.empty()) {
+            capture.input = CaptureInput::P4Shm;
+            capture.p4ShmSocket = envP4Shm;
+        }
+        const std::string envWidth = read_env("ODS_S4_WIDTH");
+        const std::string envHeight = read_env("ODS_S4_HEIGHT");
+        const std::string envFps = read_env("ODS_S4_FPS");
+        if (!envWidth.empty()) {
+            capture.width = static_cast<std::uint32_t>(std::stoul(envWidth));
+        }
+        if (!envHeight.empty()) {
+            capture.height = static_cast<std::uint32_t>(std::stoul(envHeight));
+        }
+        if (!envFps.empty()) {
+            capture.fps = std::stod(envFps);
+        }
+    } catch (const std::logic_error&) {
+        std::cerr << "invalid ODS_S4_WIDTH/HEIGHT/FPS\n";
+        return 1;
+    }
 
     try {
         for (int i = 1; i < argc; ++i) {
@@ -672,7 +712,14 @@ int main(int argc, char* argv[]) {
     std::shared_ptr<ods::s4::infrastructure::MessageRouter> messageRouter;
     if (kafkaEnabled) {
 #ifdef ODS_S4_WITH_KAFKA
-        kafkaTransport = std::make_shared<ods::s4::infrastructure::KafkaEventTransport>(kafkaConfig);
+        try {
+            kafkaTransport = std::make_shared<ods::s4::infrastructure::KafkaEventTransport>(kafkaConfig);
+        } catch (const std::exception& error) {
+            // O barramento e um complemento: sem ele a API HTTP e a captura
+            // continuam funcionando. O erro fica visivel no log.
+            std::cerr << "Kafka disabled after initialization error: "
+                      << error.what() << '\n';
+        }
 #else
         std::cerr << "Kafka requested but not compiled (ODS_S4_WITH_KAFKA disabled)\n";
 #endif

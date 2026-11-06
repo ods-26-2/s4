@@ -4,8 +4,10 @@
 #include <librdkafka/rdkafkacpp.h>
 #endif
 
+#include <cstdint>
 #include <string>
 #include <vector>
+#include <memory>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -30,10 +32,21 @@ private:
     KafkaEventTransportConfig m_config;
     std::vector<std::pair<std::string, MessageHandler>> m_subscriptions;
     std::atomic<bool> m_running{false};
+    std::atomic<bool> m_stopped{false};
+    std::atomic<bool> m_allBrokersDownLogged{false};
     std::thread m_thread;
     std::mutex m_mutex;
 
 #ifdef ODS_S4_WITH_KAFKA
+    // Callback de entrega do produtor. Declarado antes do produtor para
+    // sobreviver a ele (membros sao destruidos na ordem inversa).
+    class DeliveryReporter : public RdKafka::DeliveryReportCb {
+    public:
+        void dr_cb(RdKafka::Message& message) override;
+        std::atomic<std::uint64_t> failures{0};
+    };
+
+    DeliveryReporter m_deliveryReporter;
     std::unique_ptr<RdKafka::Conf> m_conf;
     std::unique_ptr<RdKafka::KafkaConsumer> m_consumer;
     std::unique_ptr<RdKafka::Producer> m_producer;

@@ -12,9 +12,11 @@
 #include <uuid/uuid.h>
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <iomanip>
@@ -63,6 +65,41 @@ std::string format_double(double value) {
     std::ostringstream out;
     out << std::fixed << std::setprecision(6) << value;
     return out.str();
+}
+
+std::string media_content_type(const std::string& path) {
+    std::string extension = std::filesystem::path(path).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (extension == ".mp4") return "video/mp4";
+    if (extension == ".jpg" || extension == ".jpeg") return "image/jpeg";
+    if (extension == ".png") return "image/png";
+    return "application/octet-stream";
+}
+
+// Sem vetor de path traversal: o caminho vem do banco, mas o diretorio de
+// midia e a fronteira do que esta API pode servir.
+bool is_within_directory(const std::filesystem::path& file,
+                         const std::filesystem::path& directory) {
+    if (directory.empty()) {
+        return true;
+    }
+    std::error_code ec;
+    const auto canonicalDir = std::filesystem::weakly_canonical(directory, ec);
+    if (ec) return false;
+    const auto canonicalFile = std::filesystem::weakly_canonical(file, ec);
+    if (ec) return false;
+    const std::string dir = canonicalDir.generic_string();
+    const std::string path = canonicalFile.generic_string();
+    if (path == dir) return true;
+    return path.size() > dir.size() &&
+           path.compare(0, dir.size(), dir) == 0 &&
+           path[dir.size()] == '/';
+}
+
+std::string cors_origin_from_env() {
+    const char* value = std::getenv("ODS_S4_CORS_ORIGIN");
+    return (value == nullptr || *value == '\0') ? std::string{"*"} : std::string{value};
 }
 
 std::string generate_event_id() {
@@ -307,10 +344,74 @@ ClipDescriptorHttpServer::ClipDescriptorHttpServer(
     m_impl->mediaDir = std::move(mediaDir);
     m_impl->controller = std::make_shared<ClipDescriptorController>(m_impl->repository);
 
+    const std::string corsOrigin = cors_origin_from_env();
+    httplib::Headers defaultHeaders;
+    defaultHeaders.emplace("Access-Control-Allow-Origin", corsOrigin);
+    defaultHeaders.emplace("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    defaultHeaders.emplace("Access-Control-Allow-Headers", "Content-Type");
+    defaultHeaders.emplace("Access-Control-Max-Age", "86400");
+    defaultHeaders.emplace("Vary", "Origin");
+    m_impl->server.set_default_headers(std::move(defaultHeaders));
+    m_impl->server.Options(R"(/api/v1/.*)", [corsOrigin](
+        const httplib::Request&, httplib::Response& response
+    ) {
+        response.status = 204;
+        response.set_header("Access-Control-Allow-Origin", corsOrigin);
+        response.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        response.set_header("Access-Control-Allow-Headers", "Content-Type");
+    });
+
     m_impl->server.Get("/healthz", [](const httplib::Request&, httplib::Response& response) {
         response.status = 200;
         response.set_content(R"({"status": "ok"})", "application/json");
     });
+
+    m_impl->server.Get(R"(/api/v1/clips/[A-Za-z0-9_-]+/media)",
+        [this](const httplib::Request& request, httplib::Response& response) {
+            try {
+                const std::string& path = request.path;
+                const std::size_t mediaPos = path.rfind("/media");
+                const std::size_t idEnd = mediaPos == std::string::npos ? path.size() : mediaPos;
+                const std::size_t idBegin = path.rfind('/', idEnd - 1);
+                const std::string clipId =
+                    idBegin == std::string::npos ? std::string{} : path.substr(idBegin + 1, idEnd - idBegin - 1);
+
+                const auto descriptor = m_impl->controller->getClipDescriptor(clipId);
+                if (!descriptor.has_value()) {
+                    response.status = 404;
+                    response.set_content(R"({"error":"clip not found"})", "application/json");
+                    return;
+                }
+                if (!descriptor->isAvailable) {
+                    response.status = 410;
+                    response.set_content(
+                        R"({"status":"ERROR","error":{"code":"CLIP_EXPIRED","message":"clip expired or purged by the retention policy"}})",
+                        "application/json"
+                    );
+                    return;
+                }
+                const std::filesystem::path filePath(descriptor->fileUri);
+                std::error_code ec;
+                if (!std::filesystem::is_regular_file(filePath, ec) ||
+                    !is_within_directory(filePath, m_impl->mediaDir)) {
+                    response.status = 404;
+                    response.set_content(
+                        R"({"error":"media file not found"})", "application/json"
+                    );
+                    return;
+                }
+                // O cpp-httplib escolhe 200/206 conforme Range. O tipo vem da
+                // extensao para o navegador tocar o MP4 direto.
+                response.set_header("Cache-Control", "private, max-age=60");
+                response.set_file_content(filePath.string(), media_content_type(filePath.string()));
+            } catch (const std::exception& error) {
+                response.status = 500;
+                response.set_content(
+                    "{\"error\":\"" + json_escape(error.what()) + "\"}",
+                    "application/json"
+                );
+            }
+        });
 
     m_impl->server.Get(R"(/api/v1/clips/[A-Za-z0-9_-]+)",
         [this](const httplib::Request& request, httplib::Response& response) {

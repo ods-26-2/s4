@@ -9,18 +9,23 @@ services:
       target: runtime
     image: ods/s4-media-evidence:0.1.0
     container_name: s4-media-evidence
+    # A rede do Dcomp usa 172.18.4.0/24, a mesma faixa que o Docker costuma
+    # alocar para redes bridge. Com host networking o container usa a rota da
+    # Jetson e alcanca 172.18.4.56:9092 sem NAT nem conflito de sub-rede.
+    network_mode: host
     command:
       - /app/s4_media_evidence
       - --port
-      - "8080"
+      - "18084"
       - --db
       - /data/s4.db
       - --media-dir
       - /data/media
     environment:
-      # Broker padrao historico do guia; a equipe de integracao sobrescreve
-      # via .env. Para subir sem barramento, use --kafka-disabled no command.
-      ODS_S4_KAFKA_BROKERS: ${ODS_S4_KAFKA_BROKERS:-34.66.235.91:9093}
+      # Broker da Jetson, restrito a rede interna do Dcomp. A equipe de
+      # integracao pode sobrescrever via .env; para subir sem barramento use
+      # --kafka-disabled no command.
+      ODS_S4_KAFKA_BROKERS: ${ODS_S4_KAFKA_BROKERS:-172.18.4.56:9092}
       ODS_S4_KAFKA_GROUP_ID: ${ODS_S4_KAFKA_GROUP_ID:-s4-media-evidence}
       ODS_S4_KAFKA_CLIENT_ID: ${ODS_S4_KAFKA_CLIENT_ID:-s4}
       ODS_S4_KAFKA_SECURITY_PROTOCOL: ${ODS_S4_KAFKA_SECURITY_PROTOCOL:-}
@@ -28,21 +33,30 @@ services:
       ODS_S4_KAFKA_SASL_USERNAME: ${ODS_S4_KAFKA_SASL_USERNAME:-}
       ODS_S4_KAFKA_SASL_PASSWORD: ${ODS_S4_KAFKA_SASL_PASSWORD:-}
       ODS_S4_KAFKA_SSL_CA_LOCATION: ${ODS_S4_KAFKA_SSL_CA_LOCATION:-}
-    ports:
-      # 0.0.0.0 para a demonstracao ser acessada pelo IP da Jetson, nunca
-      # apenas por localhost.
-      - "8080:8080"
+      # Fonte de video: vazio = sintetica (demo). Para integracao, defina UMA
+      # das duas no .env: ODS_S4_P4_SHM=/ipc/ods_p4_cam0 ou ODS_S4_SOURCE=...
+      ODS_S4_SOURCE: ${ODS_S4_SOURCE:-}
+      ODS_S4_P4_SHM: ${ODS_S4_P4_SHM:-}
+      ODS_S4_WIDTH: ${ODS_S4_WIDTH:-1280}
+      ODS_S4_HEIGHT: ${ODS_S4_HEIGHT:-720}
+      ODS_S4_FPS: ${ODS_S4_FPS:-30}
+      # CORS da API HTTP; "*" para a rede interna.
+      ODS_S4_CORS_ORIGIN: "${ODS_S4_CORS_ORIGIN:-*}"
     volumes:
       # Bind mount no NVMe real: o statvfs precisa medir o volume onde os
       # clipes ficam (a cota de 85% do S4.3 nao funciona sobre volume Docker).
       - ${ODS_S4_DATA_DIR:-./data}:/data
+      # Diretorio do socket do P4 (shmsink). Com network_mode: host a rede e
+      # direta, mas o socket ainda e um caminho de filesystem. O caminho
+      # interno e /ipc/<socket>, usado em ODS_S4_P4_SHM.
+      - ${ODS_S4_IPC_DIR:-/tmp}:/ipc
     # O ring buffer do S4.1 vive em /dev/shm. O padrão do Docker é 64 MB, que
     # não cobre janelas maiores nem múltiplas câmeras: 30 s a 4 Mbps já custam
     # ~22 MB por câmera (ver docs/S4.1-ring-buffer.md).
     shm_size: "256m"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18084/healthz"]
       interval: 30s
       timeout: 3s
       start_period: 5s
