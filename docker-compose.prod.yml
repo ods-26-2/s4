@@ -1,0 +1,80 @@
+# ===============================================================
+# S4 Media Evidence — compose de PRODUCAO (imagem pronta do registry)
+# ===============================================================
+#
+# Diferente do docker-compose.yml, este arquivo NAO tem secao `build:`. Ele
+# apenas baixa a imagem publicada (Docker Hub ou outro registry) e sobe. E o
+# caminho para a Jetson (arm64) e para uma VM na nuvem (amd64): em vez de
+# compilar na borda, so faz pull.
+#
+# Uso:
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Escolher a imagem/tag (padrao: ods/s4-media-evidence:0.1.0):
+#   S4_IMAGE=seuuser/s4-media-evidence:0.1.0 docker compose -f docker-compose.prod.yml up -d
+#
+# OBS: este arquivo espelha o servico do docker-compose.yml. Ao mudar
+# environment/volumes/command aqui, atualize o outro (e vice-versa).
+#
+# OBS: o docker-compose.override.yml NAO e carregado quando se usa -f, entao
+# este arquivo sobe a configuracao de producao limpa (sem o prazo de 3 min da
+# apresentacao).
+
+services:
+  s4-media-evidence:
+    image: ${S4_IMAGE:-ods/s4-media-evidence:0.1.0}
+    # Sempre puxa do registry: garante que a tag :latest nao sirva uma camada
+    # velha em cache local.
+    pull_policy: always
+    container_name: s4-media-evidence
+    # Com host networking o container usa a rota da Jetson e alcanca o broker
+    # Kafka externo (200.17.66.56:9093) sem NAT.
+    network_mode: host
+    command:
+      - /app/s4_media_evidence
+      - --port
+      - "18084"
+      - --db
+      - /data/s4.db
+      - --media-dir
+      - /data/media
+    environment:
+      # Broker Kafka da equipe de integracao. Pode ser sobrescrito via .env;
+      # para subir sem barramento use --kafka-disabled no command.
+      ODS_S4_KAFKA_BROKERS: ${ODS_S4_KAFKA_BROKERS:-200.17.66.56:9093}
+      ODS_S4_KAFKA_GROUP_ID: ${ODS_S4_KAFKA_GROUP_ID:-s4-media-evidence}
+      ODS_S4_KAFKA_CLIENT_ID: ${ODS_S4_KAFKA_CLIENT_ID:-s4}
+      ODS_S4_KAFKA_SECURITY_PROTOCOL: ${ODS_S4_KAFKA_SECURITY_PROTOCOL:-}
+      ODS_S4_KAFKA_SASL_MECHANISM: ${ODS_S4_KAFKA_SASL_MECHANISM:-}
+      ODS_S4_KAFKA_SASL_USERNAME: ${ODS_S4_KAFKA_SASL_USERNAME:-}
+      ODS_S4_KAFKA_SASL_PASSWORD: ${ODS_S4_KAFKA_SASL_PASSWORD:-}
+      ODS_S4_KAFKA_SSL_CA_LOCATION: ${ODS_S4_KAFKA_SSL_CA_LOCATION:-}
+      # Fonte de video: vazio = sintetica (demo). Para integracao, defina UMA
+      # das duas no .env: ODS_S4_P4_SHM=/ipc/ods_p4_cam0 ou ODS_S4_SOURCE=...
+      ODS_S4_SOURCE: ${ODS_S4_SOURCE:-}
+      ODS_S4_P4_SHM: ${ODS_S4_P4_SHM:-}
+      ODS_S4_WIDTH: ${ODS_S4_WIDTH:-1280}
+      ODS_S4_HEIGHT: ${ODS_S4_HEIGHT:-720}
+      ODS_S4_FPS: ${ODS_S4_FPS:-30}
+      # CORS da API HTTP; "*" para a rede interna.
+      ODS_S4_CORS_ORIGIN: "${ODS_S4_CORS_ORIGIN:-*}"
+    volumes:
+      # Bind mount no NVMe real: o statvfs precisa medir o volume onde os
+      # clipes ficam (a cota de 85% do S4.3 nao funciona sobre volume Docker).
+      - ${ODS_S4_DATA_DIR:-./data}:/data
+      # Diretorio do socket do P4 (shmsink). Com network_mode: host a rede e
+      # direta, mas o socket ainda e um caminho de filesystem. O caminho
+      # interno e /ipc/<socket>, usado em ODS_S4_P4_SHM.
+      - ${ODS_S4_IPC_DIR:-/tmp}:/ipc
+    # O ring buffer do S4.1 vive em /dev/shm. O padrao do Docker e 64 MB, que
+    # nao cobre janelas maiores nem multiplas cameras: 30 s a 4 Mbps ja custam
+    # ~22 MB por camera (ver docs/S4.1-ring-buffer.md).
+    shm_size: "256m"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18084/healthz"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3

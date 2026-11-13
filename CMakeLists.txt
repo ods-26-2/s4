@@ -4,6 +4,22 @@ project(s4_media_evidence
     LANGUAGES CXX
 )
 
+# --- Cache de compilacao -----------------------------------------------------
+# ccache recompila apenas o que mudou: num rebuild incremental e a diferenca
+# entre minutos e segundos. Guardado por find_program para nao exigir ccache de
+# quem nao tem -- o build segue normal, so sem o atalho.
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    message(STATUS "ccache encontrado: ${CCACHE_PROGRAM}")
+endif()
+
+# Release por padrao: sem isto um build "cru" (sem -DCMAKE_BUILD_TYPE) sai sem
+# otimizacao nenhuma, que e o pior dos dois mundos em tempo de execucao.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Tipo de build" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -13,6 +29,17 @@ if(MSVC)
     add_compile_options(/W4 /permissive-)
 else()
     add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+# -O3 nao se paga aqui: o custo do build esta no codegen dos templates do
+# httplib.h, e medido no projeto inteiro -O3 gasta 446s de CPU contra 426s de
+# -O2 (a diferenca de throughput no servidor nao justifica os 20s). Os testes
+# descem mais um degrau, para -O1, logo abaixo.
+#
+# So rebaixa o -O3 que o CMake poe por padrao: quem passou
+# -DCMAKE_CXX_FLAGS_RELEASE=... de proposito continua mandando.
+if(CMAKE_CXX_FLAGS_RELEASE STREQUAL "-O3 -DNDEBUG")
+    set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "Flags de Release" FORCE)
 endif()
 
 # Include directories
@@ -156,6 +183,12 @@ function(s4_add_test name source)
     add_executable(${name} ${source})
     target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(${name} PRIVATE s4_media_evidence_lib)
+    # Testes nao precisam de -O2/-O3: compilar com -O1 corta ~26% do tempo total
+    # de build do projeto e nao muda nada do que a suite verifica. O -O1 vem
+    # depois do -O2 do CMAKE_CXX_FLAGS_RELEASE, entao vence na linha de comando.
+    if(NOT MSVC)
+        target_compile_options(${name} PRIVATE -O1)
+    endif()
     add_test(NAME ${name} COMMAND ${name})
     # O CTest roda a partir do diretorio de build, mas os testes leem cenarios
     # gravados e o video de teste por caminho relativo a raiz do projeto.

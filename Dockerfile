@@ -1,9 +1,13 @@
+# syntax=docker/dockerfile:1.7
 # ===============================================================
 # S4 Media Evidence — multi-stage build (amd64 e arm64)
 # ===============================================================
 
-# ---------- Estágio 1: builder (toolchain + testes) ----------
-FROM debian:bookworm-slim AS builder
+# ---------- Estágio 0: deps (toolchain) ----------
+# Separado do builder para que o cache de pacotes do apt sobreviva a mudanças no
+# código: com --mount=type=cache o apt não rebaixa os .deb a cada build (o cache
+# vive fora da camada da imagem, então não engorda o resultado).
+FROM debian:bookworm-slim AS deps
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -32,9 +36,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 # mas a imagem para de provar que o material de video passa pelo encoder e pelo
 # decoder. E avdec_h264 e o mesmo elemento que o smoke procura para verificar
 # pixels; sem ele esse ramo do smoke tambem vira "pula".
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
         g++ \
         cmake \
+        ninja-build \
+        ccache \
         make \
         pkg-config \
         libsqlite3-dev \
@@ -48,8 +56,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gstreamer1.0-plugins-bad \
         gstreamer1.0-plugins-ugly \
         gstreamer1.0-libav \
-        gstreamer1.0-tools \
-    && rm -rf /var/lib/apt/lists/*
+        gstreamer1.0-tools
+
+# ---------- Estágio 1: builder (toolchain + testes) ----------
+FROM deps AS builder
+
+# Gate de testes ligado por padrão: um `docker build` comum continua rodando o
+# ctest e uma falha continua quebrando a imagem. Quem quer só o binário (para
+# iterar rápido na imagem) pede --build-arg RUN_TESTS=OFF e recebe apenas o
+# alvo s4_media_evidence, sem compilar os 18 binários de teste (~55% do build).
+ARG RUN_TESTS=ON
 
 WORKDIR /src
 
@@ -71,10 +87,20 @@ COPY video_test ./video_test
 # de rodar e sairia com 77 — "Skipped", que o build aceitaria. Com a option, a
 # ausencia do material reprova. Numa imagem que tem o video,(video ausente) e
 # uma falha de build, nao uma opcao.
-RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DODS_S4_REQUIRE_SAMPLE_VIDEO=ON \
+#
+# Ninja no lugar de Make e ccache montado do host: o rebuild de uma mudanca de
+# codigo so recompila o que mudou.
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DODS_S4_REQUIRE_SAMPLE_VIDEO=ON \
         -DODS_S4_WITH_KAFKA=ON -DODS_S4_REQUIRE_KAFKA=ON \
- && cmake --build build -j"$(nproc)" \
- && ctest --test-dir build --output-on-failure
+ && if [ "$RUN_TESTS" = "ON" ]; then \
+        cmake --build build -j"$(nproc)" \
+        && ctest --test-dir build --output-on-failure; \
+    else \
+        echo "RUN_TESTS=OFF: construindo apenas s4_media_evidence (sem ctest)"; \
+        cmake --build build --target s4_media_evidence -j"$(nproc)"; \
+    fi
 
 # ---------- Estágio 2: runtime (somente libs e binário) ------
 FROM debian:bookworm-slim AS runtime
@@ -88,7 +114,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 # plugins-ugly traz o x264enc: na arquitetura 6c o S4 recebe quadros CRUS de P4
 # e codifica por software, porque a Jetson Orin Nano nao tem NVENC. Sem ele os
 # modos --p4-fake/--p4-shm nao sobem (S4.1, item 1). O shmsrc vem do -bad.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
         libsqlite3-0 \
         libssl3 \
         libuuid1 \
@@ -101,7 +129,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gstreamer1.0-plugins-good \
         gstreamer1.0-plugins-bad \
         gstreamer1.0-plugins-ugly \
-    && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 s4 \
     && mkdir -p /data/media \
     && chown -R s4:s4 /data
@@ -145,11 +172,12 @@ USER root
 # imprime "pula sem decoder" — honesto, porem fraco: o ramo de pixels do smoke
 # so vira prova se existe decoder, e nao ha decoder em debian-slim sem este
 # pacote.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
         jq \
         gstreamer1.0-tools \
-        gstreamer1.0-libav \
-    && rm -rf /var/lib/apt/lists/*
+        gstreamer1.0-libav
 
 COPY scripts/smoke_e2e.sh /app/scripts/smoke_e2e.sh
 RUN chmod +x /app/scripts/smoke_e2e.sh

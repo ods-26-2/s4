@@ -30,9 +30,15 @@ ambiente da máquina de desenvolvimento.
 
 ## 4. Dockerfile (multi-stage)
 
-- **`builder`** (`debian:bookworm-slim`): instala `g++`, `cmake`, `make`, `libsqlite3-dev`,
-  `libssl-dev`, `uuid-dev`; copia `CMakeLists.txt`, `include/`, `src/`, `tests/`, `third_party/`;
-  roda `cmake --build` e **`ctest` dentro da etapa de build** (impede subir imagem com teste vermelho).
+- **`deps`** (`debian:bookworm-slim`): instala `g++`, `cmake`, `ninja-build`, `ccache`, `make`,
+  `libsqlite3-dev`, `libssl-dev`, `uuid-dev` e o GStreamer. Separado do `builder` e com
+  `--mount=type=cache` no apt, para não rebaixar os `.deb` a cada build.
+- **`builder`** (`FROM deps`): copia `CMakeLists.txt`, `include/`, `src/`, `tests/`, `third_party/`,
+  `scenarios/` e `video_test/`; roda `cmake` (Ninja) + `cmake --build` e **`ctest` dentro da etapa de
+  build** (impede subir imagem com teste vermelho). O gate é controlado pelo build-arg **`RUN_TESTS`**
+  (padrão `ON`); com `--build-arg RUN_TESTS=OFF` compila apenas `s4_media_evidence`, pulando os 18
+  binários de teste (~55% do tempo). O ccache é montado como cache (`--mount=type=cache`), então
+  rebuilds de mudanças pequenas são quase instantâneos.
 - **`runtime`** (`debian:bookworm-slim`): instala somente libs de runtime (`libsqlite3-0`,
   `libssl3`, `libuuid1`, `libstdc++6`, `curl` para healthcheck); cria usuário não-root `s4`;
   copia o binário `s4_media_evidence`; expõe `18084`; `HEALTHCHECK` via `GET /healthz`.
@@ -72,7 +78,8 @@ docker stop s4-test
 docker compose up --build -d
 ```
 
-O `ctest` roda dentro do `builder` a cada build → falha de teste quebra a imagem.
+O `ctest` roda dentro do `builder` a cada build → falha de teste quebra a imagem. O build-arg
+`RUN_TESTS=OFF` desliga esse gate de propósito (imagem rápida para iterar); o padrão é `ON`.
 
 ## 7. Build e execução na Jetson (ARM64)
 

@@ -163,7 +163,7 @@ no relógio de captura — uma janela ancorada no instante mais recente esperari
 
 | Verificação | Resultado |
 | :--- | :--- |
-| `ctest` (13 suítes) | 13/13, estáveis em execuções repetidas. Duas podem sair **Skipped** (`77`) em vez de aprovadas: `test_s4_replay_e2e`, sem MP4 em `video_test/`, e `test_s4_gstreamer_capture`, sem `x264enc`/`avdec_h264`. Skipped é o resultado honesto para "não executado"; para reprovar nesses casos, `-DODS_S4_REQUIRE_SAMPLE_VIDEO=ON` |
+| `ctest` (18 suítes) | 18/18, estáveis em execuções repetidas. Duas podem sair **Skipped** (`77`) em vez de aprovadas: `test_s4_replay_e2e`, sem MP4 em `video_test/`, e `test_s4_gstreamer_capture`, sem `x264enc`/`avdec_h264`. Skipped é o resultado honesto para "não executado"; para reprovar nesses casos, `-DODS_S4_REQUIRE_SAMPLE_VIDEO=ON` |
 | E2E com MP4 real: replay → evento → extração | `201`; container aceito por `qtdemux ! h264parse ! fakesink` |
 | SHA-256 do artefato | igual ao publicado no descritor **e igual entre execuções** do mesmo material |
 | Mesma extração em máquina distinta | hash idêntico dentro do container Debian e no host |
@@ -239,10 +239,21 @@ Resumo; o detalhamento está em [`docs/S4.3-retencao-expurgo.md`](docs/S4.3-rete
 ### Compilando o Projeto
 
 ```bash
+cmake --preset release      # Ninja + ccache + compile_commands.json
+cmake --build build
+```
+
+Sem presets (equivalente):
+
+```bash
 mkdir -p build && cd build
-cmake ..
+cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build .
 ```
+
+O preset usa **Ninja** e **ccache** quando disponíveis: o primeiro build é completo, mas
+rebuilds incrementais recompilam só o que mudou. Sem ccache instalado o build funciona
+igual, apenas sem o atalho.
 
 ### Executando Testes
 
@@ -250,7 +261,8 @@ Os testes de unidade seguem a convenção `deve_[resultado]_quando_[condicao]`. 
 (exceto o cálculo de hash); a integração cobre SQLite em arquivo temporário, extração com filesystem real e servidor HTTP.
 
 ```bash
-ctest --output-on-failure
+ctest --preset release --output-on-failure
+# equivalente: ctest --test-dir build --output-on-failure
 ```
 
 ### Executando o Serviço (daemon demo)
@@ -387,6 +399,12 @@ Imagem OCI **multi-arch** (`debian:bookworm-slim`, multi-stage): o estágio `bui
 `ctest` completo (falha de teste quebra o build), e o estágio `runtime` final contém apenas as bibliotecas em tempo de
 execução e o binário, rodando como usuário não-root `s4` com `VOLUME /data`.
 
+O gate de testes é controlado pelo build-arg **`RUN_TESTS`** (padrão `ON`): um `docker build` comum continua rodando
+o `ctest` e uma falha continua quebrando a imagem. Para iterar na imagem sem recompilar/rodar os testes, use
+`--build-arg RUN_TESTS=OFF` (ou `S4_RUN_TESTS=OFF docker compose build`) — o build passa a construir apenas o alvo
+`s4_media_evidence`, pulando ~55% do tempo de compilação. O `builder` usa Ninja e ccache (com cache mount), então
+rebuilds de mudanças pequenas são quase instantâneos.
+
 Na Sprint 3 o alvo é a **Jetson (ARM64)**, sem nuvem. O `docker-compose.yml`
 monta `/data` no NVMe real (`ODS_S4_DATA_DIR`), usa `network_mode: host` para
 alcançar o Kafka externo (`200.17.66.56:9093`) sem NAT, e lê a fonte de captura
@@ -395,6 +413,45 @@ de `ODS_S4_P4_SHM` ou
 [`docs/PLANO_SPRINT3_JETSON.md`](docs/PLANO_SPRINT3_JETSON.md) e o
 [`DEMO.md`](DEMO.md). Com `--kafka-disabled`, o serviço sobe e atende apenas a
 API HTTP.
+
+### Publicar e implantar via registry (Docker Hub)
+
+O build acima é para desenvolvimento. Em produção (Jetson arm64 ou VM na nuvem amd64) o
+caminho é **publicar uma vez e só puxar** — a borda não compila.
+
+Publicar (multi-arch, a partir de qualquer máquina com `buildx`):
+
+```bash
+docker login                                   # uma vez
+scripts/publish_image.sh                       # amd64+arm64, tag 0.1.0, --push
+# para o seu namespace:  IMAGE=seuuser/s4-media-evidence scripts/publish_image.sh
+```
+
+O script usa um builder `docker-container` e publica um índice de manifesto com as duas
+arquiteturas; o `docker pull` na Jetson escolhe a variante arm64 sozinho. O gate de testes
+continua valendo (`RUN_TESTS=ON`); como o `ctest` sob emulação é lento, o recomendado é
+validar nativo antes e publicar com `RUN_TESTS=OFF` (o script avisa).
+
+Implantar na Jetson (arm64) ou numa VM na nuvem (amd64), **sem build**:
+
+```bash
+cp .env.example .env        # ajuste S4_IMAGE, ODS_S4_DATA_DIR, Kafka, fonte de video
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
+```
+
+O `docker-compose.prod.yml` não tem seção `build:` e usa `pull_policy: always`; a imagem vem
+do registry apontado por `S4_IMAGE`. O `docker-compose.override.yml` **não** é carregado
+quando se usa `-f`, então esse deploy sobe a configuração de produção limpa.
+
+Notas para a borda:
+
+- **Tamanho importa mais que o build no deploy:** a imagem tem ~1,6 GB (a maior parte é o
+  GStreamer em runtime). O tempo de subida é dominado pelo `pull`, não pela compilação.
+- **Docker Hub tem limite de pulls anônimos.** Para frota, autentique (`docker login`) ou
+  use um registry privado / pull-through cache na rede local.
+- **Fixe por digest** para reprodutibilidade: `S4_IMAGE=ods/s4-media-evidence@sha256:...`.
+
 # Guia de Desenvolvimento e Execução - Kit B6 (Módulo MOD-2)
 
 Este repositório contém a implementação dos submódulos de interface **B6.1 (OverlayPlayer)** e **B6.2 (ZoneEditor)**, responsáveis pela renderização gráfica acelerada e edição topológica vetorial do ecossistema ODS.
