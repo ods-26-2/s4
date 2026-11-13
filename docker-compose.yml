@@ -15,7 +15,7 @@ services:
     image: ods/s4-media-evidence:0.1.0
     container_name: s4-media-evidence
     # Com host networking o container usa a rota da Jetson e alcanca o broker
-    # Kafka externo (200.17.66.56:9093) sem NAT.
+    # Kafka externo (34.66.235.91:9093) sem NAT.
     network_mode: host
     command:
       - /app/s4_media_evidence
@@ -28,7 +28,7 @@ services:
     environment:
       # Broker Kafka da equipe de integracao. Pode ser sobrescrito via .env;
       # para subir sem barramento use --kafka-disabled no command.
-      ODS_S4_KAFKA_BROKERS: ${ODS_S4_KAFKA_BROKERS:-200.17.66.56:9093}
+      ODS_S4_KAFKA_BROKERS: ${ODS_S4_KAFKA_BROKERS:-34.66.235.91:9093}
       ODS_S4_KAFKA_GROUP_ID: ${ODS_S4_KAFKA_GROUP_ID:-s4-media-evidence}
       ODS_S4_KAFKA_CLIENT_ID: ${ODS_S4_KAFKA_CLIENT_ID:-s4}
       ODS_S4_KAFKA_SECURITY_PROTOCOL: ${ODS_S4_KAFKA_SECURITY_PROTOCOL:-}

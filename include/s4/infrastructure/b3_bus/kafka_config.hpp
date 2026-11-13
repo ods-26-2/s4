@@ -8,7 +8,7 @@ namespace ods::s4::infrastructure {
 // integracao; quem opera o barramento pode sobrescreve-lo por ambiente ou flag.
 // Para operar sem barramento use --kafka-disabled.
 struct KafkaEventTransportConfig {
-    std::string brokers = "200.17.66.56:9093";
+    std::string brokers = "34.66.235.91:9093";
     std::string groupId = "s4-media-evidence";
     std::string clientId = "s4";
     std::string securityProtocol;

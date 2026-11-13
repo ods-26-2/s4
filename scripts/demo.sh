@@ -13,7 +13,7 @@
 #      BASE_URL padrao: http://127.0.0.1:18084 (ou S4_BASE_URL)
 #
 # Kafka: le o log do daemon (S4_LOG_FILE ou docker compose) e testa o broker
-#        200.17.66.56:9093 com kcat/kafkacat (se houver) ou TCP. Pule com
+#        34.66.235.91:9093 com kcat/kafkacat (se houver) ou TCP. Pule com
 #        S4_SKIP_KAFKA_CHECK=1; para outro endereco use S4_KAFKA_PROBE_BROKERS.
 
 set -euo pipefail
@@ -224,9 +224,9 @@ if command -v docker >/dev/null 2>&1 && \
             | sed -n 's/^ODS_S4_KAFKA_BROKERS=//p' | tail -1 | tr -d '\r')"
     fi
 fi
-KAFKA_BROKERS="${KAFKA_BROKERS:-200.17.66.56:9093}"
+KAFKA_BROKERS="${KAFKA_BROKERS:-34.66.235.91:9093}"
 
-# O broker fica em 200.17.66.56:9093. O probe usa o mesmo endereco do daemon,
+# O broker fica em 34.66.235.91:9093. O probe usa o mesmo endereco do daemon,
 # a menos que S4_KAFKA_PROBE_BROKERS aponte para outro.
 KAFKA_PROBE_BROKERS="${S4_KAFKA_PROBE_BROKERS:-${KAFKA_BROKERS}}"
 KAFKA_PROBE_EXTERNAL=0
